@@ -9,3 +9,6 @@ license.workspace = true
 [dependencies]
 genesis-core = { workspace = true }
 anyhow = "1"
+
+[build-dependencies]
+cc = "1.0"
