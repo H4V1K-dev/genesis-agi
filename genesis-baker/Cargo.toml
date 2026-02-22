@@ -1,0 +1,19 @@
+[package]
+name = "genesis-baker"
+description = "TOML config compiler → binary .state/.axons blobs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "baker"
+path = "src/main.rs"
+
+[dependencies]
+genesis-core = { workspace = true }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+wyhash = "0.5"

@@ -1,0 +1,11 @@
+[package]
+name = "genesis-runtime"
+description = "Day/Night cycle orchestrator and CUDA kernel runner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+genesis-core = { workspace = true }
+anyhow = "1"
