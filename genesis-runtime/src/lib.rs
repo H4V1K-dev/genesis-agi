@@ -1,4 +1,5 @@
 pub mod ffi;
+pub mod config;
 pub mod memory;
 pub mod network;
 pub mod orchestrator;
