@@ -65,4 +65,11 @@ extern "C" {
         prune_threshold: i16,
         stream: *mut c_void,
     );
+    pub fn launch_inject_inputs(
+        axon_heads: *mut c_void,
+        input_bitmask: *const c_void,
+        virtual_offset: u32,
+        num_virtual: u32,
+        stream: *mut c_void,
+    );
 }

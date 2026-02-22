@@ -17,7 +17,8 @@ fn main() {
         .file("cuda/apply_spike_batch.cu")
         .file("cuda/record_outputs.cu")
         .file("cuda/sort_and_prune.cu")
-        .compile("libgenesis_cuda.a");
+        .file("cuda/inject_inputs.cu")
+        .compile("genesis_cuda");
 
     // Automatically link CUDA runtime
     println!("cargo:rustc-link-lib=cudart");

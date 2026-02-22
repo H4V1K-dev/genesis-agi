@@ -390,3 +390,56 @@ fn test_sort_and_prune() {
     assert_eq!(target(5), 0, "Slot 5 (orig weight 0) should be pruned");
 }
 
+#[test]
+fn test_inject_inputs() {
+    let consts = setup_constants();
+    Runtime::init_constants(&consts);
+
+    // Create 10 neurons, 64 axons. pa will be 64.
+    let builder = MockBakerBuilder::new(10, 64);
+    // Sentinel values are set for all 64 axons implicitly.
+
+    let (state_bytes, axons_bytes) = builder.build();
+    let mut vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
+    
+    // We configure the last 32 axons to be virtual (Sensory Input)
+    vram.virtual_offset = 32;
+    vram.num_virtual = 32;
+
+    // Prepare 2 ticks of input bitmask.
+    // u32s_per_tick = 32 / 32 = 1. Total buffer needed = 2 * 1 = 2 u32s.
+    let mut bitmask = vec![0u32; 2];
+    
+    // Tick 0: Virtual axon index 5 fires. (Global axon index 32 + 5 = 37).
+    bitmask[0] |= 1 << 5;
+    
+    // Tick 1: Virtual axon index 10 fires. (Global axon index 32 + 10 = 42).
+    bitmask[1] |= 1 << 10;
+    
+    vram.upload_input_bitmask(&bitmask).unwrap();
+    
+    let mut runtime = Runtime::new(vram, 3); // v_seg = 3
+    
+    use genesis_runtime::network::bsp::BspBarrier;
+    use genesis_runtime::network::router::SpikeRouter;
+    use genesis_runtime::orchestrator::day_phase::DayPhase;
+    
+    let barrier = BspBarrier::new(2); // 2 ticks batch
+    let mut router = SpikeRouter::new();
+    
+    // Run day phase for 2 ticks.
+    // Tick 0: Inject 5 -> head=0. Propagate -> head=3.
+    // Tick 1: Inject 10 -> head=0. Propagate -> head=3. Axon 5 head=6.
+    DayPhase::run_batch(&mut runtime, &barrier, &mut router, std::ptr::null_mut());
+    
+    runtime.synchronize();
+    
+    let heads = runtime.vram.download_axon_head_index().unwrap();
+    
+    assert_eq!(heads[37], 6, "Virtual axon 5 should have propagated twice (2 * 3 = 6)");
+    assert_eq!(heads[42], 3, "Virtual axon 10 should have propagated once (1 * 3 = 3)");
+    
+    // physics.cu explicitly conditionally skips incrementing the sentinel
+    assert_eq!(heads[38], 0x80000000, "Uninjected virtual axon should remain sentinel");
+}
+

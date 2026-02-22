@@ -13,6 +13,22 @@ impl DayPhase {
         let batch_ticks = schedule.sync_batch_ticks;
 
         for current_tick in 0..batch_ticks {
+            // 0. Inject Sensory Inputs (Virtual Axons)
+            if runtime.vram.num_virtual > 0 {
+                let u32s_per_tick = (runtime.vram.num_virtual as usize + 31) / 32;
+                let byte_offset = (current_tick as usize) * u32s_per_tick * 4;
+                unsafe {
+                    let ptr = (runtime.vram.input_bitmask_buffer as *mut u8).add(byte_offset) as *const c_void;
+                    ffi::launch_inject_inputs(
+                        runtime.vram.axon_head_index,
+                        ptr,
+                        runtime.vram.virtual_offset,
+                        runtime.vram.num_virtual,
+                        std::ptr::null_mut(),
+                    );
+                }
+            }
+
             // 1. Process Network Spikes for this specific tick
             let num_spikes = schedule.counts[current_tick];
             if num_spikes > 0 {

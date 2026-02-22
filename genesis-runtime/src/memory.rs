@@ -23,6 +23,11 @@ pub struct VramState {
     pub dendrite_weights: *mut c_void,
     pub dendrite_refractory: *mut c_void,
 
+    // Virtual Axons (InjectInputs)
+    pub num_virtual: u32,
+    pub virtual_offset: u32,
+    pub input_bitmask_buffer: *mut c_void,
+
     // Outbound Spikes (Per-Tick, MAX_SPIKES_PER_TICK length)
     pub outbound_spikes_buffer: *mut c_void,
     pub outbound_spikes_count: *mut c_void,
@@ -84,9 +89,16 @@ impl VramState {
         let zero: u32 = 0;
         unsafe { ffi::gpu_memcpy_host_to_device(outbound_spikes_count, &zero as *const _ as *const c_void, 4) };
 
+        // Virtual Axons placeholder allocation (default up to 8192 u32s = 32KB = 262k bits)
+        let input_bitmask_buffer = unsafe { ffi::gpu_malloc(32768) };
+        let mut zero_vec = vec![0u8; 32768];
+        unsafe { ffi::gpu_memcpy_host_to_device(input_bitmask_buffer, zero_vec.as_ptr() as *const c_void, 32768) };
+
         Ok(VramState {
             padded_n: pn,
             total_axons: pa,
+            num_virtual: 0,
+            virtual_offset: pa as u32,
             voltage,
             threshold_offset,
             refractory_timer,
@@ -98,6 +110,7 @@ impl VramState {
             dendrite_refractory,
             outbound_spikes_buffer,
             outbound_spikes_count,
+            input_bitmask_buffer,
         })
     }
 
@@ -221,6 +234,19 @@ impl VramState {
     pub fn download_outbound_spikes_buffer(&self, count: usize) -> anyhow::Result<Vec<u32>> {
         self.download_generic(self.outbound_spikes_buffer, count)
     }
+
+    pub fn upload_input_bitmask(&self, host_mask: &[u32]) -> anyhow::Result<()> {
+        let size = std::mem::size_of_val(host_mask);
+        let success = unsafe {
+            ffi::gpu_memcpy_host_to_device(
+                self.input_bitmask_buffer,
+                host_mask.as_ptr() as *const std::ffi::c_void,
+                size,
+            )
+        };
+        if !success { anyhow::bail!("Failed to upload input bitmask") }
+        Ok(())
+    }
 }
 
 impl Drop for VramState {
@@ -241,6 +267,7 @@ impl Drop for VramState {
 
             ffi::gpu_free(self.outbound_spikes_buffer);
             ffi::gpu_free(self.outbound_spikes_count);
+            ffi::gpu_free(self.input_bitmask_buffer);
         }
     }
 }
