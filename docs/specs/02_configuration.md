@@ -118,7 +118,7 @@ pub struct ShardStateSoA {
 
     // Dendrite arrays — Columnar Layout (size = 128 × padded_n)
     // Обращение в CUDA: data[slot * padded_n + tid]
-    pub dendrite_targets: Vec<u32>,  // 4 bytes × 128 × N (Packed: Axon_ID | Segment_Index)
+    pub dendrite_targets: Vec<u32>,  // 4 bytes × 128 × N (Packed: 24b Axon_ID | 8b Segment_Index)
     pub dendrite_weights: Vec<i16>,  // 2 bytes × 128 × N (Signed: знак = E/I)
     pub dendrite_timers: Vec<u8>,    // 1 byte × 128 × N
 

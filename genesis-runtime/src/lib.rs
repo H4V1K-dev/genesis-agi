@@ -95,6 +95,7 @@ impl Runtime {
                 self.vram.dendrite_targets,
                 self.vram.dendrite_weights,
                 self.vram.axon_head_index,
+                self.v_seg,
                 ptr::null_mut(),
             );
 
@@ -106,6 +107,7 @@ impl Runtime {
                 self.vram.dendrite_weights,
                 self.vram.dendrite_refractory, // Note: passing refractory as timers
                 self.vram.axon_head_index,
+                self.v_seg,
                 ptr::null_mut(),
             );
         }

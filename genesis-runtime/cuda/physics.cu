@@ -4,6 +4,9 @@
 
 #define AXON_SENTINEL 0x80000000
 
+// Active Tail length in segments. dist <= PROPAGATION_LENGTH -> synapse fires.
+#define PROPAGATION_LENGTH 10
+
 // Constant memory structures
 struct alignas(32) VariantParameters {
   int32_t threshold;
@@ -67,7 +70,7 @@ __global__ void update_neurons_kernel(uint32_t padded_n, int32_t *voltage,
                                       uint32_t *soma_to_axon,
                                       uint32_t *dendrite_targets,
                                       int16_t *dendrite_weights,
-                                      uint32_t *axon_heads) {
+                                      uint32_t *axon_heads, uint32_t v_seg) {
   uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid >= padded_n)
     return;
@@ -102,8 +105,12 @@ __global__ void update_neurons_kernel(uint32_t padded_n, int32_t *voltage,
 
         // Active Tail Check
         uint32_t head = axon_heads[axon_id];
-        if (head != AXON_SENTINEL && (head - segment) == 0) {
-          dendrite_sum += dendrite_weights[slot * padded_n + tid];
+        if (head != AXON_SENTINEL) {
+          uint32_t distance =
+              (head >= segment) ? (head - segment) : (head + v_seg - segment);
+          if (distance <= PROPAGATION_LENGTH) {
+            dendrite_sum += dendrite_weights[slot * padded_n + tid];
+          }
         }
       }
     }
@@ -144,14 +151,14 @@ extern "C" void
 launch_update_neurons(uint32_t padded_n, void *voltage, void *threshold_offset,
                       void *refractory_timer, void *flags, void *soma_to_axon,
                       void *dendrite_targets, void *dendrite_weights,
-                      void *axon_heads, void *stream) {
+                      void *axon_heads, uint32_t v_seg, void *stream) {
   int blockSize = 128; // Smaller block for high register count
   int numBlocks = (padded_n + blockSize - 1) / blockSize;
   update_neurons_kernel<<<numBlocks, blockSize, 0, (cudaStream_t)stream>>>(
       padded_n, (int32_t *)voltage, (int32_t *)threshold_offset,
       (uint8_t *)refractory_timer, (uint8_t *)flags, (uint32_t *)soma_to_axon,
       (uint32_t *)dendrite_targets, (int16_t *)dendrite_weights,
-      (uint32_t *)axon_heads);
+      (uint32_t *)axon_heads, v_seg);
 }
 
 // 3. Apply GSOP Kernel
@@ -159,7 +166,7 @@ __global__ void apply_gsop_kernel(uint32_t padded_n, uint8_t *flags,
                                   uint32_t *dendrite_targets,
                                   int16_t *dendrite_weights,
                                   uint8_t *dendrite_timers,
-                                  uint32_t *axon_heads) {
+                                  uint32_t *axon_heads, uint32_t v_seg) {
   uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid >= padded_n)
     return;
@@ -178,7 +185,13 @@ __global__ void apply_gsop_kernel(uint32_t padded_n, uint8_t *flags,
       uint32_t head = axon_heads[axon_id];
 
       uint8_t timer = dendrite_timers[slot * padded_n + tid];
-      bool contact = (head != AXON_SENTINEL && (head - segment) == 0);
+
+      bool contact = false;
+      if (head != AXON_SENTINEL) {
+        uint32_t distance =
+            (head >= segment) ? (head - segment) : (head + v_seg - segment);
+        contact = (distance <= PROPAGATION_LENGTH);
+      }
 
       if (contact) {
         // Pre-synaptic spike resets the timer
@@ -219,11 +232,12 @@ __global__ void apply_gsop_kernel(uint32_t padded_n, uint8_t *flags,
 extern "C" void launch_apply_gsop(uint32_t padded_n, void *flags,
                                   void *dendrite_targets,
                                   void *dendrite_weights, void *dendrite_timers,
-                                  void *axon_heads, void *stream) {
+                                  void *axon_heads, uint32_t v_seg,
+                                  void *stream) {
   int blockSize = 128;
   int numBlocks = (padded_n + blockSize - 1) / blockSize;
   apply_gsop_kernel<<<numBlocks, blockSize, 0, (cudaStream_t)stream>>>(
       padded_n, (uint8_t *)flags, (uint32_t *)dendrite_targets,
       (int16_t *)dendrite_weights, (uint8_t *)dendrite_timers,
-      (uint32_t *)axon_heads);
+      (uint32_t *)axon_heads, v_seg);
 }

@@ -45,7 +45,7 @@ struct DendriteColumns {
     // 128 массивов. В каждом — данные для ВСЕХ нейронов шарда.
     // В цикле `for slot in 0..128` варп читает connected_axon_id[slot]
     // идеально линейно. Bandwidth используется на 100%.
-    connected_axon_id: [*mut u32; 128], // Packed: [31..16] Axon_ID, [15..0] Segment_Index
+    connected_axon_id: [*mut u32; 128], // Packed: [31..8] Axon_ID (24b), [7..0] Segment_Index (8b)
     synapse_weight:    [*mut i16; 128], // Signed: (+) = Excitatory, (-) = Inhibitory. Знак бейкается.
     refractory_timer:  [*mut u8; 128],  // Локальный таймер невосприимчивости синапса
 }
