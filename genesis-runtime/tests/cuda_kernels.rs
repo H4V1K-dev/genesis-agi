@@ -161,7 +161,7 @@ fn test_orchestrator_day_phase() {
     barrier.ingest_spike_batch(&incoming_spikes);
     
     // Swap barrier (read what we just ingested)
-    barrier.sync_and_swap();
+    barrier.sync_and_swap(std::collections::HashMap::new());
 
     // The Orchestrator expects schedule.buffer to be on the GPU! Let's memcopy it.
     let schedule = barrier.get_active_schedule();
@@ -181,8 +181,10 @@ fn test_orchestrator_day_phase() {
     // THIS IS ILLEGAL! We passed a Host Pointer to `launch_apply_spike_batch_impl`!
     // Since this is just a test/stub, let's fix DayPhase to accept a device pointer.
 
+    let mut router = genesis_runtime::network::router::SpikeRouter::new();
+
     // Run the Day Phase with the copied device pointer!
-    DayPhase::run_batch(&mut runtime, &barrier, gpu_schedule_buffer);
+    DayPhase::run_batch(&mut runtime, &barrier, &mut router, gpu_schedule_buffer);
     runtime.synchronize();
 
     let axon_heads = runtime.vram.download_axon_head_index().unwrap();
@@ -243,7 +245,8 @@ fn test_record_outputs() {
         );
     }
 
-    DayPhase::run_batch(&mut runtime, &barrier, gpu_schedule_buffer);
+    let mut router = genesis_runtime::network::router::SpikeRouter::new();
+    DayPhase::run_batch(&mut runtime, &barrier, &mut router, gpu_schedule_buffer);
     runtime.synchronize();
 
     let count = runtime.vram.download_outbound_spikes_count().unwrap();
@@ -256,6 +259,75 @@ fn test_record_outputs() {
     assert!(spikes.contains(&0), "Expected neuron 0 in outbound spikes");
     assert!(spikes.contains(&2), "Expected neuron 2 in outbound spikes");
     assert!(!spikes.contains(&1), "Neuron 1 should not have spiked");
+
+    unsafe { genesis_runtime::ffi::gpu_free(gpu_schedule_buffer); }
+}
+
+#[test]
+fn test_spike_routing() {
+    use std::ffi::c_void;
+    use genesis_runtime::network::router::{SpikeRouter, GhostTarget};
+
+    let consts = setup_constants();
+    Runtime::init_constants(&consts);
+
+    let mut builder = MockBakerBuilder::new(3, 1);
+    
+    // We want neuron 0 and neuron 2 to fire, exactly like test_record_outputs
+    builder.voltages[0] = 150;
+    builder.voltages[1] = 0;
+    builder.voltages[2] = 150;
+    
+    builder.refractory_timers[0] = 0;
+    builder.refractory_timers[1] = 0;
+    builder.refractory_timers[2] = 0;
+
+    let (state_bytes, axons_bytes) = builder.build();
+    let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
+    let mut runtime = Runtime::new(vram, 1);
+
+    // 1 tick, nothing incoming
+    let barrier = BspBarrier::new(1);
+    let schedule_size = 1024 * std::mem::size_of::<u32>();
+    let gpu_schedule_buffer = unsafe { genesis_runtime::ffi::gpu_malloc(schedule_size) };
+    let zero: u32 = 0;
+    unsafe {
+        genesis_runtime::ffi::gpu_memcpy_host_to_device(
+            gpu_schedule_buffer,
+            &zero as *const _ as *const c_void, 
+            4
+        );
+    }
+
+    let mut router = SpikeRouter::new();
+    
+    // Map Neuron 0 -> Node 1 (Ghost ID 100), Node 2 (Ghost ID 50)
+    router.add_route(0, GhostTarget { node_id: 1, ghost_id: 100, tick_offset: 5 }); // Arrives +5 ticks late
+    router.add_route(0, GhostTarget { node_id: 2, ghost_id: 50, tick_offset: 10 });
+    
+    // Map Neuron 2 -> Node 1 (Ghost ID 101)
+    router.add_route(2, GhostTarget { node_id: 1, ghost_id: 101, tick_offset: 5 });
+
+    DayPhase::run_batch(&mut runtime, &barrier, &mut router, gpu_schedule_buffer);
+    runtime.synchronize();
+
+    let outgoing = router.flush_outgoing();
+    
+    // We expect Node 1 to get 2 spikes (from 0 and 2)
+    let node_1_spikes = outgoing.get(&1).expect("Node 1 should have spikes");
+    assert_eq!(node_1_spikes.len(), 2, "Node 1 should receive 2 spikes");
+    
+    // Validate Node 1's SpikeEvents
+    let has_ghost_100 = node_1_spikes.iter().any(|s| s.receiver_ghost_id == 100 && s.tick_offset == 5);
+    let has_ghost_101 = node_1_spikes.iter().any(|s| s.receiver_ghost_id == 101 && s.tick_offset == 5);
+    assert!(has_ghost_100, "Node 1 missing spike for ghost 100");
+    assert!(has_ghost_101, "Node 1 missing spike for ghost 101");
+
+    // We expect Node 2 to get 1 spike (from 0)
+    let node_2_spikes = outgoing.get(&2).expect("Node 2 should have spikes");
+    assert_eq!(node_2_spikes.len(), 1, "Node 2 should receive 1 spike");
+    assert_eq!(node_2_spikes[0].receiver_ghost_id, 50, "Node 2 spike should target ghost 50");
+    assert_eq!(node_2_spikes[0].tick_offset, 10, "Node 2 spike should have tick offset 10");
 
     unsafe { genesis_runtime::ffi::gpu_free(gpu_schedule_buffer); }
 }

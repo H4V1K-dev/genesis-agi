@@ -1,5 +1,6 @@
 use crate::Runtime;
 use crate::network::bsp::BspBarrier;
+use crate::network::router::SpikeRouter;
 use crate::ffi;
 use std::ffi::c_void;
 
@@ -7,7 +8,7 @@ pub struct DayPhase;
 
 impl DayPhase {
     /// Runs the main GPU compute loop for one full synchronization batch.
-    pub fn run_batch(runtime: &mut Runtime, barrier: &BspBarrier, gpu_schedule_buffer: *mut c_void) {
+    pub fn run_batch(runtime: &mut Runtime, barrier: &BspBarrier, router: &mut SpikeRouter, gpu_schedule_buffer: *mut c_void) {
         let schedule = barrier.get_active_schedule();
         let batch_ticks = schedule.sync_batch_ticks;
 
@@ -68,10 +69,8 @@ impl DayPhase {
                         (host_count as usize) * 4
                     );
 
-                    // TODO: In a real system, these dense IDs are handed over to the network layer
-                    // where they are mapped to Ghost IDs and UDP transmitted.
-                    // For now, we print them (or collect them) if debugging.
-                    // println!("Tick {}: {} neurons spiked!", current_tick, host_count);
+                    // We pass them to the router immediately to translate into Network packets
+                    router.route_spikes(&host_spikes, current_tick as u32);
                 }
             }
         }

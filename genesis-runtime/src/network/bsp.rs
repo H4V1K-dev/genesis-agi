@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::network::SpikeEvent;
 use crate::network::ring_buffer::SpikeSchedule;
 
@@ -6,6 +7,7 @@ pub struct BspBarrier {
     pub schedule_a: SpikeSchedule,
     pub schedule_b: SpikeSchedule,
     pub writing_to_b: bool,
+    pub outgoing_batches: HashMap<u32, Vec<SpikeEvent>>,
 }
 
 impl BspBarrier {
@@ -14,13 +16,16 @@ impl BspBarrier {
             schedule_a: SpikeSchedule::new(sync_batch_ticks),
             schedule_b: SpikeSchedule::new(sync_batch_ticks),
             writing_to_b: true,
+            outgoing_batches: HashMap::new()
         }
     }
 
     /// Executed by the Orchestrator at the end of the Day Phase batch.
-    pub fn sync_and_swap(&mut self) {
+    pub fn sync_and_swap(&mut self, new_outgoing: HashMap<u32, Vec<SpikeEvent>>) {
         // Here we would:
         // 1. Send our outgoing spikes.
+        self.outgoing_batches = new_outgoing;
+        //    (In a real socket implementation, we wouldn't just store them, we'd transmit them over UDP)
         // 2. Wait for incoming UDP/TCP packets and fill the writing schedule.
 
         self.writing_to_b = !self.writing_to_b;
