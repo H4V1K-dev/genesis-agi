@@ -124,6 +124,119 @@ pub fn connect_dendrites(
     }
 }
 
+/// Вызывается оркестратором во время Night Phase (Maintenance Pipeline).
+/// Сканирует существующие `dendrite_targets` на наличие пустых слотов (`0`), 
+/// ищет новые аксоны через Cone Tracing (пространственную решётку), 
+/// и перезаписывает пустые `targets` и `weights`.
+pub fn reconnect_empty_dendrites(
+    targets: &mut [u32],
+    weights: &mut [i16],
+    padded_n: usize,
+    neurons: &[PlacedNeuron],
+    axons: &[GrownAxon],
+    neuron_types: &[NeuronType],
+    master_seed: u64,
+) {
+    let grid = build_axon_grid(axons);
+
+    for (soma_id, neuron) in neurons.iter().enumerate() {
+        // Collect indices of empty slots for this neuron
+        let mut empty_slots: Vec<usize> = Vec::new();
+        for slot in 0..MAX_DENDRITE_SLOTS {
+            let cell = slot * padded_n + soma_id;
+            if targets[cell] == 0 {
+                empty_slots.push(slot);
+            }
+        }
+
+        if empty_slots.is_empty() {
+            continue; // Neuron is fully connected, skip spatial search
+        }
+
+        let soma_x = neuron.x();
+        let soma_y = neuron.y();
+        let soma_z = neuron.z();
+        let nt = &neuron_types[neuron.type_idx.min(neuron_types.len() - 1)];
+        let cfg = SproutingWeights::from_neuron_type(nt);
+
+        let cell_x = soma_x / CELL_SIZE;
+        let cell_y = soma_y / CELL_SIZE;
+        let cell_z = soma_z / CELL_SIZE;
+
+        let mut candidates: Vec<Candidate> = Vec::new();
+
+        // 3x3x3 Neighborhood search
+        for dx in 0..=2u32 {
+            for dy in 0..=2u32 {
+                for dz in 0..=2u32 {
+                    let cx = cell_x.saturating_add(dx).saturating_sub(1);
+                    let cy = cell_y.saturating_add(dy).saturating_sub(1);
+                    let cz = cell_z.saturating_add(dz).saturating_sub(1);
+
+                    let Some(cell_axons) = grid.get(&(cx, cy, cz)) else {
+                        continue;
+                    };
+
+                    for &axon_idx in cell_axons {
+                        let ax = &axons[axon_idx];
+                        if ax.soma_idx == soma_id {
+                            continue; // No self connections
+                        }
+
+                        // Also prevent duplicate connections (check existing targets)
+                        let mut already_connected = false;
+                        for slot in 0..MAX_DENDRITE_SLOTS {
+                            let cell = slot * padded_n + soma_id;
+                            let target = targets[cell];
+                            if target != 0 && (target >> 8) as usize == axon_idx {
+                                already_connected = true;
+                                break;
+                            }
+                        }
+                        if already_connected {
+                            continue;
+                        }
+
+                        let dist = voxel_dist(soma_x, soma_y, soma_z, ax.tip_x, ax.tip_y, ax.tip_z);
+                        if dist > CELL_SIZE as f32 {
+                            continue;
+                        }
+
+                        let epoch_seed = entity_seed(
+                            master_seed,
+                            (soma_id.wrapping_mul(31).wrapping_add(axon_idx)) as u32,
+                        );
+                        // TODO: Pass actual target power from downloaded weights
+                        let score = sprouting_score(dist, 0.0, epoch_seed, &cfg);
+                        candidates.push(Candidate { axon_idx, score });
+                    }
+                }
+            }
+        }
+
+        candidates.sort_unstable_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        // Fill only the empty slots
+        for (cand, &slot) in candidates.iter().zip(empty_slots.iter()) {
+            let axon_idx = cand.axon_idx;
+            let target_type = axons[axon_idx].type_idx;
+            let is_excitatory = neuron_types
+                .get(target_type)
+                .map(|n| n.name.contains("Excitatory"))
+                .unwrap_or(true);
+            let weight = if is_excitatory {
+                INITIAL_EXCITATORY_WEIGHT
+            } else {
+                INITIAL_INHIBITORY_WEIGHT
+            };
+
+            let cell = slot * padded_n + soma_id;
+            targets[cell] = (axon_idx as u32) << 8;
+            weights[cell] = weight;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +388,57 @@ sprouting_weight_explore = 0.1
             axons.len(),
             "Every axon must appear in grid exactly once"
         );
+    }
+
+    #[test]
+    fn test_reconnect_empty_dendrites() {
+        let (mut shard, neurons, axons) = build_small_shard();
+        let bp = blueprints::parse(BP).unwrap();
+        let master = seed_from_str(DEFAULT_MASTER_SEED);
+        
+        // Count initially connected
+        let mut initial_connected = 0;
+        for &t in shard.dendrite_targets.iter() {
+            if t != 0 {
+                initial_connected += 1;
+            }
+        }
+        
+        // Zero out a few specific connections (simulate pruning)
+        shard.dendrite_targets[0] = 0;
+        shard.dendrite_weights[0] = 0;
+        shard.dendrite_targets[shard.padded_n] = 0; // slot 1 for soma 0
+        shard.dendrite_weights[shard.padded_n] = 0;
+        
+        let mut pruned_connected = 0;
+        for &t in shard.dendrite_targets.iter() {
+            if t != 0 {
+                pruned_connected += 1;
+            }
+        }
+        assert_eq!(pruned_connected, initial_connected - 2, "Pruning failed");
+        
+        // Reconnect
+        reconnect_empty_dendrites(
+            &mut shard.dendrite_targets,
+            &mut shard.dendrite_weights,
+            shard.padded_n,
+            &neurons,
+            &axons,
+            &bp.neuron_type,
+            master,
+        );
+        
+        // Verify they were filled
+        let mut final_connected = 0;
+        for &t in shard.dendrite_targets.iter() {
+            if t != 0 {
+                final_connected += 1;
+            }
+        }
+        
+        assert!(final_connected > pruned_connected, "No dendrites were reconnected");
+        assert_ne!(shard.dendrite_targets[0], 0, "Slot 0 was not reconnected");
+        assert_ne!(shard.dendrite_weights[0], 0, "Slot 0 weight was not set");
     }
 }

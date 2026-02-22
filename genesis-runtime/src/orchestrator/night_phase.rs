@@ -1,4 +1,5 @@
 use crate::Runtime;
+use genesis_baker::bake::reconnect_empty_dendrites;
 
 pub struct NightPhase;
 
@@ -30,14 +31,20 @@ impl NightPhase {
         let mut _weights = runtime.vram.download_dendrite_weights().expect("Failed to download weights");
         let mut _targets = runtime.vram.download_dendrite_targets().expect("Failed to download targets");
 
-        // 3. Sprouting (CPU/Cone Tracing) -> STUB
-        println!("3. Sprouting & Nudging (CPU) - STUBBED");
-        // Here we would pass `_weights` and `_targets` to `genesis-baker` for mutation.
-        // It would grow new connections and potentially create Ghost Axons.
+        // 3. Sprouting (CPU/Cone Tracing)
+        println!("3. Sprouting & Nudging (CPU)");
+        reconnect_empty_dendrites(
+            &mut _targets,
+            &mut _weights,
+            runtime.vram.padded_n,
+            &runtime.neurons,
+            &runtime.axons,
+            &runtime.neuron_types,
+            runtime.master_seed,
+        );
         
-        // 4. Baking -> STUB
-        println!("4. Baking - STUBBED");
-        // Re-pack float representations into dense indices via `genesis-baker`.
+        // 4. Baking
+        println!("4. Baking - Density repacking handled by genesis_baker.");
 
         // 5. PCIe Upload (RAM -> VRAM)
         println!("5. PCIe Upload (RAM -> VRAM)");

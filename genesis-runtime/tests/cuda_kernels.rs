@@ -40,7 +40,7 @@ fn test_propagate_axons() {
 
     let (state_bytes, axons_bytes) = builder.build();
     let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
-    let mut runtime = Runtime::new(vram, 3); // v_seg = 3
+    let mut runtime = Runtime::new(vram, 3, std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), 0); // v_seg = 3
 
     runtime.tick();
     runtime.synchronize();
@@ -75,7 +75,7 @@ fn test_update_neurons() {
 
     let (state_bytes, axons_bytes) = builder.build();
     let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
-    let mut runtime = Runtime::new(vram, 1);
+    let mut runtime = Runtime::new(vram, 1, std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), 0);
 
     runtime.tick();
     runtime.synchronize();
@@ -116,7 +116,7 @@ fn test_apply_gsop() {
 
     let (state_bytes, axons_bytes) = builder.build();
     let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
-    let mut runtime = Runtime::new(vram, 1);
+    let mut runtime = Runtime::new(vram, 1, std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), 0);
 
     runtime.tick();
     runtime.synchronize();
@@ -149,7 +149,7 @@ fn test_orchestrator_day_phase() {
 
     let (state_bytes, axons_bytes) = builder.build();
     let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
-    let mut runtime = Runtime::new(vram, 2); // v_seg = 2
+    let mut runtime = Runtime::new(vram, 2, std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), 0); // v_seg = 2
 
     // 100 ticks per batch
     let mut barrier = BspBarrier::new(100);
@@ -161,7 +161,10 @@ fn test_orchestrator_day_phase() {
     barrier.ingest_spike_batch(&incoming_spikes);
     
     // Swap barrier (read what we just ingested)
-    barrier.sync_and_swap(std::collections::HashMap::new());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        barrier.sync_and_swap(std::collections::HashMap::new(), 0).await.unwrap();
+    });
 
     // The Orchestrator expects schedule.buffer to be on the GPU! Let's memcopy it.
     let schedule = barrier.get_active_schedule();
@@ -184,7 +187,9 @@ fn test_orchestrator_day_phase() {
     let mut router = genesis_runtime::network::router::SpikeRouter::new();
 
     // Run the Day Phase with the copied device pointer!
-    DayPhase::run_batch(&mut runtime, &barrier, &mut router, gpu_schedule_buffer);
+    rt.block_on(async {
+        DayPhase::run_batch(&mut runtime, &mut barrier, &mut router, gpu_schedule_buffer, 0).await.unwrap();
+    });
     runtime.synchronize();
 
     let axon_heads = runtime.vram.download_axon_head_index().unwrap();
@@ -230,10 +235,10 @@ fn test_record_outputs() {
 
     let (state_bytes, axons_bytes) = builder.build();
     let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
-    let mut runtime = Runtime::new(vram, 1);
+    let mut runtime = Runtime::new(vram, 1, std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), 0);
 
     // We only need 1 tick to test firing
-    let barrier = BspBarrier::new(1);
+    let mut barrier = BspBarrier::new(1);
     let schedule_size = 1024 * std::mem::size_of::<u32>();
     let gpu_schedule_buffer = unsafe { genesis_runtime::ffi::gpu_malloc(schedule_size) };
     let zero: u32 = 0;
@@ -246,7 +251,10 @@ fn test_record_outputs() {
     }
 
     let mut router = genesis_runtime::network::router::SpikeRouter::new();
-    DayPhase::run_batch(&mut runtime, &barrier, &mut router, gpu_schedule_buffer);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        DayPhase::run_batch(&mut runtime, &mut barrier, &mut router, gpu_schedule_buffer, 0).await.unwrap();
+    });
     runtime.synchronize();
 
     let count = runtime.vram.download_outbound_spikes_count().unwrap();
@@ -284,10 +292,10 @@ fn test_spike_routing() {
 
     let (state_bytes, axons_bytes) = builder.build();
     let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
-    let mut runtime = Runtime::new(vram, 1);
+    let mut runtime = Runtime::new(vram, 1, std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), 0);
 
     // 1 tick, nothing incoming
-    let barrier = BspBarrier::new(1);
+    let mut barrier = BspBarrier::new(1);
     let schedule_size = 1024 * std::mem::size_of::<u32>();
     let gpu_schedule_buffer = unsafe { genesis_runtime::ffi::gpu_malloc(schedule_size) };
     let zero: u32 = 0;
@@ -308,10 +316,13 @@ fn test_spike_routing() {
     // Map Neuron 2 -> Node 1 (Ghost ID 101)
     router.add_route(2, GhostTarget { node_id: 1, ghost_id: 101, tick_offset: 5 });
 
-    DayPhase::run_batch(&mut runtime, &barrier, &mut router, gpu_schedule_buffer);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        DayPhase::run_batch(&mut runtime, &mut barrier, &mut router, gpu_schedule_buffer, 0).await.unwrap();
+    });
     runtime.synchronize();
 
-    let outgoing = router.flush_outgoing();
+    let outgoing = barrier.outgoing_batches.clone();
     
     // We expect Node 1 to get 2 spikes (from 0 and 2)
     let node_1_spikes = outgoing.get(&1).expect("Node 1 should have spikes");
@@ -418,19 +429,22 @@ fn test_inject_inputs() {
     
     vram.upload_input_bitmask(&bitmask).unwrap();
     
-    let mut runtime = Runtime::new(vram, 3); // v_seg = 3
+    let mut runtime = Runtime::new(vram, 3, std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), 0); // v_seg = 3
     
     use genesis_runtime::network::bsp::BspBarrier;
     use genesis_runtime::network::router::SpikeRouter;
     use genesis_runtime::orchestrator::day_phase::DayPhase;
     
-    let barrier = BspBarrier::new(2); // 2 ticks batch
+    let mut barrier = BspBarrier::new(2); // 2 ticks batch
     let mut router = SpikeRouter::new();
     
     // Run day phase for 2 ticks.
     // Tick 0: Inject 5 -> head=0. Propagate -> head=3.
     // Tick 1: Inject 10 -> head=0. Propagate -> head=3. Axon 5 head=6.
-    DayPhase::run_batch(&mut runtime, &barrier, &mut router, std::ptr::null_mut());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        DayPhase::run_batch(&mut runtime, &mut barrier, &mut router, std::ptr::null_mut(), 1).await.unwrap();
+    });
     
     runtime.synchronize();
     
@@ -441,5 +455,47 @@ fn test_inject_inputs() {
     
     // physics.cu explicitly conditionally skips incrementing the sentinel
     assert_eq!(heads[38], 0x80000000, "Uninjected virtual axon should remain sentinel");
+}
+
+#[test]
+fn test_night_phase_cycle() {
+    let consts = setup_constants();
+    Runtime::init_constants(&consts);
+
+    let mut builder = MockBakerBuilder::new(10, 64);
+    
+    // Give soma 0 slot 0 a target with very weak weight (should be pruned)
+    builder.dendrite_targets[0] = 5 << 8; 
+    builder.dendrite_weights[0] = -10; 
+
+    // Give soma 0 slot 1 a target with strong weight (should survive)
+    builder.dendrite_targets[10] = 6 << 8; // slot 1 = 1 * padded_n + 0 = 10 (since padded_n is 10 for 10 neurons? No, padded_n is 32)
+    // Actually mock baker sets padded_n = n.max(32) rounded up to 32. So for 10 neurons, padded_n = 32.
+    // So slot 1 for neuron 0 is at index 32.
+    builder.dendrite_targets[32] = 6 << 8;
+    builder.dendrite_weights[32] = 100;
+
+    let (state_bytes, axons_bytes) = builder.build();
+    let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
+    let mut runtime = Runtime::new(vram, 3, std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), std::sync::Arc::new(vec![]), 0);
+
+    // Run the Night Phase wrapper to trigger maintenance
+    use genesis_runtime::orchestrator::night_phase::NightPhase;
+    
+    // Trigger condition is tick % interval == 0
+    let did_run = NightPhase::check_and_run(&mut runtime, 0, 100, 100);
+    assert!(did_run, "Night phase should trigger");
+    
+    // Check outcome
+    let downloaded_targets = runtime.vram.download_dendrite_targets().unwrap();
+    let downloaded_weights = runtime.vram.download_dendrite_weights().unwrap();
+    
+    // Note: Since sort_and_prune places the largest absolute weights at the top of the slots (LTM),
+    // the strong weight (100) will be moved to slot 0 for neuron 0!
+    assert_eq!(downloaded_targets[0], 6 << 8, "Strong weight 100 should be promoted to slot 0");
+    assert_eq!(downloaded_weights[0], 100, "Strong weight 100 should be promoted to slot 0");
+    
+    // Slot 1 (index 32 for padded_n=32) should be completely empty (pruned target)
+    assert_eq!(downloaded_targets[32], 0, "Slot 1 should be pruned (target 0)");
 }
 

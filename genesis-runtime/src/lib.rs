@@ -6,6 +6,10 @@ pub mod orchestrator;
 use memory::VramState;
 use std::ptr;
 use std::ffi::c_void;
+use std::sync::Arc;
+use genesis_baker::bake::neuron_placement::PlacedNeuron;
+use genesis_baker::bake::axon_growth::GrownAxon;
+use genesis_baker::parser::blueprints::NeuronType;
 
 #[repr(C, align(32))]
 #[derive(Clone, Copy, Default)]
@@ -45,11 +49,24 @@ impl Default for GenesisConstantMemory {
 pub struct Runtime {
     pub vram: VramState,
     pub v_seg: u32,
+    
+    // CPU Static Geometry for Night Phase Maintenance
+    pub neurons: Arc<Vec<PlacedNeuron>>,
+    pub axons: Arc<Vec<GrownAxon>>,
+    pub neuron_types: Arc<Vec<NeuronType>>,
+    pub master_seed: u64,
 }
 
 impl Runtime {
-    pub fn new(vram: VramState, v_seg: u32) -> Self {
-        Self { vram, v_seg }
+    pub fn new(
+        vram: VramState, 
+        v_seg: u32,
+        neurons: Arc<Vec<PlacedNeuron>>,
+        axons: Arc<Vec<GrownAxon>>,
+        neuron_types: Arc<Vec<NeuronType>>,
+        master_seed: u64,
+    ) -> Self {
+        Self { vram, v_seg, neurons, axons, neuron_types, master_seed }
     }
 
     pub fn init_constants(constants: &GenesisConstantMemory) -> bool {

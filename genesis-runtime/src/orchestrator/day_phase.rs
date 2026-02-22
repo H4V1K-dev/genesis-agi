@@ -8,7 +8,7 @@ pub struct DayPhase;
 
 impl DayPhase {
     /// Runs the main GPU compute loop for one full synchronization batch.
-    pub fn run_batch(runtime: &mut Runtime, barrier: &BspBarrier, router: &mut SpikeRouter, gpu_schedule_buffer: *mut c_void) {
+    pub async fn run_batch(runtime: &mut Runtime, barrier: &mut BspBarrier, router: &mut SpikeRouter, gpu_schedule_buffer: *mut c_void, batch_id: u32) -> anyhow::Result<()> {
         let schedule = barrier.get_active_schedule();
         let batch_ticks = schedule.sync_batch_ticks;
 
@@ -93,5 +93,11 @@ impl DayPhase {
 
         // Wait for all GPU streams to finish before network barrier
         runtime.synchronize();
+
+        // Flush outbound router queues and run the BSP Barrier Sync
+        let outgoing = router.flush_outgoing();
+        barrier.sync_and_swap(outgoing, batch_id).await?;
+        
+        Ok(())
     }
 }
