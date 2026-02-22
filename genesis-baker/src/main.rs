@@ -27,6 +27,8 @@ enum Commands {
         blueprints: PathBuf,
         #[arg(long, default_value = "anatomy.toml")]
         anatomy: PathBuf,
+        #[arg(long, default_value = "io.toml")]
+        io: PathBuf,
         #[arg(short, long, default_value = "baked/")]
         output: PathBuf,
     },
@@ -39,12 +41,13 @@ fn main() -> Result<()> {
             simulation,
             blueprints,
             anatomy,
+            io,
             output,
-        } => compile(&simulation, &blueprints, &anatomy, &output),
+        } => compile(&simulation, &blueprints, &anatomy, &io, &output),
     }
 }
 
-fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, out_dir: &Path) -> Result<()> {
+fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_dir: &Path) -> Result<()> {
     // --- 1. Parse ---
     println!("[baker] Parsing configs...");
     let sim = parser::simulation::parse(
@@ -62,6 +65,18 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, out_dir: &Path) -> R
             .with_context(|| format!("Cannot read {}", an_path.display()))?,
     )
     .context("Failed to parse anatomy.toml")?;
+    // IO is technically optional for an isolated shard, but we parse it if it exists.
+    let io = if io_path.exists() {
+        Some(
+            parser::io::parse(
+                &std::fs::read_to_string(io_path)
+                    .with_context(|| format!("Cannot read {}", io_path.display()))?,
+            )
+            .context("Failed to parse io.toml")?,
+        )
+    } else {
+        None
+    };
     println!(
         "[baker] ✓ Parsed: {} neuron types, {} layers",
         blueprints.neuron_type.len(),
@@ -91,14 +106,25 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, out_dir: &Path) -> R
     // --- 5. Cone Tracing: grow axons ---
     println!("[baker] Growing axons (Cone Tracing)...");
     let layer_ranges = bake::axon_growth::compute_layer_ranges(&anatomy, &sim);
-    let axons = bake::axon_growth::grow_axons(
+    let mut axons = bake::axon_growth::grow_axons(
         &neurons,
         &layer_ranges,
         &blueprints.neuron_type,
         &sim,
         master_seed,
     );
-    println!("[baker] ✓ Grown {} axons", axons.len());
+    let local_axons_count = axons.len();
+
+    // --- 5.5 Atlas Routing (White Matter) ---
+    if let Some(io_cfg) = &io {
+        println!("[baker] Processing Atlas Routing (External Axons)...");
+        let mut ext_axons =
+            bake::axon_growth::grow_external_axons(io_cfg, &layer_ranges, &sim, master_seed);
+        println!("[baker] ✓ Injected {} external projections", ext_axons.len());
+        axons.append(&mut ext_axons);
+    }
+
+    println!("[baker] ✓ Total Grown: {} axons ({} local)", axons.len(), local_axons_count);
 
     // --- 6. Build SoA state ---
     let rest_potential = blueprints
@@ -115,8 +141,8 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, out_dir: &Path) -> R
         if i < shard.axon_heads.len() {
             shard.axon_heads[i] = bake::axon_growth::init_axon_head(ax.length_segments, v_seg);
         }
-        // soma_to_axon маппинг: сома i → аксон i (1:1 в initial bake)
-        if ax.soma_idx < shard.soma_to_axon.len() {
+        // soma_to_axon маппинг: сома i → аксон i
+        if ax.soma_idx != usize::MAX && ax.soma_idx < shard.soma_to_axon.len() {
             shard.soma_to_axon[ax.soma_idx] = i as u32;
         }
     }

@@ -287,3 +287,54 @@ sprouting_weight_explore = 0.1
         );
     }
 }
+
+/// Generates fake "External" Ghost Axons that originate from other shards (Atlas Routing).
+/// They aren't attached to any local soma, so `soma_idx` is set to `usize::MAX`.
+pub fn grow_external_axons(
+    io_config: &crate::parser::io::IoConfig,
+    layer_ranges: &[LayerZRange],
+    sim: &SimulationConfig,
+    master_seed: u64,
+) -> Vec<GrownAxon> {
+    let mut ext_axons = Vec::new();
+    let world_w_vox = sim.world.width_um / sim.simulation.voxel_size_um;
+    let world_d_vox = sim.world.depth_um / sim.simulation.voxel_size_um;
+
+    for (channel_idx, channel) in io_config.input.iter().enumerate() {
+        // Find the target layer bounds
+        let layer_z = layer_ranges.iter().find(|l| l.name == channel.target_layer);
+        let (z_start, z_end) = match layer_z {
+            Some(l) => (l.z_start_vox, l.z_end_vox),
+            None => continue, // Layer not found, skip projecting here
+        };
+
+        let depth = (z_end - z_start).max(1) as f32;
+
+        for i in 0..channel.axon_count {
+            // Seed uniquely identifies this external projection
+            let s = master_seed
+                .wrapping_add(channel_idx as u64)
+                .wrapping_add(i as u64);
+
+            // Jitter the entry tip throughout the destination layer
+            let tip_x = (random_f32(s) * world_w_vox as f32) as u32;
+            let tip_y = (random_f32(s.wrapping_add(1)) * world_d_vox as f32) as u32;
+            let tip_z = z_start + (random_f32(s.wrapping_add(2)) * depth) as u32;
+
+            let tip_x = tip_x.min(world_w_vox.saturating_sub(1));
+            let tip_y = tip_y.min(world_d_vox.saturating_sub(1));
+            let tip_z = tip_z.min(z_end);
+
+            ext_axons.push(GrownAxon {
+                soma_idx: usize::MAX, // Signifies external origin
+                type_idx: channel.type_mask as usize, // Stuffs the 4-bit config phenotype
+                tip_x,
+                tip_y,
+                tip_z,
+                length_segments: 1, // Assume they just "entered" the shard at the border
+            });
+        }
+    }
+
+    ext_axons
+}
