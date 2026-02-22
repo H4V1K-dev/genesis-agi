@@ -131,3 +131,75 @@ fn test_apply_gsop() {
     assert!(new_w0 > 100, "Weight 0 should be potentiated, was {} expected > 100", new_w0);
     assert!(new_w1 < 100, "Weight 1 should be depressed, was {} expected < 100", new_w1);
 }
+
+use genesis_runtime::network::{SpikeEvent, bsp::BspBarrier};
+use genesis_runtime::orchestrator::day_phase::DayPhase;
+
+#[test]
+fn test_orchestrator_day_phase() {
+    let consts = setup_constants();
+    Runtime::init_constants(&consts);
+
+    let mut builder = MockBakerBuilder::new(1, 2);
+    // Axon 0 is Active Local Axon
+    builder.axon_heads[0] = 10;
+    
+    // Axon 1 is Ghost Axon (receives network spikes). Let's say network spike resets it to 0.
+    builder.axon_heads[1] = 0x80000000; // start as Sentinel
+
+    let (state_bytes, axons_bytes) = builder.build();
+    let vram = VramState::load_shard(&state_bytes, &axons_bytes).unwrap();
+    let mut runtime = Runtime::new(vram, 2); // v_seg = 2
+
+    // 100 ticks per batch
+    let mut barrier = BspBarrier::new(100);
+
+    // Simulate incoming network traffic from previous Night Phase / Barrier
+    let incoming_spikes = vec![
+        SpikeEvent { receiver_ghost_id: 1, tick_offset: 5, _pad: [0; 3] }, // Arrives at tick 5
+    ];
+    barrier.ingest_spike_batch(&incoming_spikes);
+    
+    // Swap barrier (read what we just ingested)
+    barrier.sync_and_swap();
+
+    // The Orchestrator expects schedule.buffer to be on the GPU! Let's memcopy it.
+    let schedule = barrier.get_active_schedule();
+    let schedule_size = schedule.buffer.len() * std::mem::size_of::<u32>();
+    let gpu_schedule_buffer = unsafe { genesis_runtime::ffi::gpu_malloc(schedule_size) };
+    unsafe {
+        genesis_runtime::ffi::gpu_memcpy_host_to_device(
+            gpu_schedule_buffer,
+            schedule.buffer.as_ptr() as *const std::ffi::c_void,
+            schedule_size
+        );
+    }
+    
+    // Temporarily replace the schedule buffer inside the barrier just for the CUDA pointer!
+    // We can't mutate barrier, so we change day_phase to take a raw pointer or do it here. 
+    // Wait, in `day_phase.rs` we did `schedule.buffer[offset..].as_ptr() as *mut c_void`
+    // THIS IS ILLEGAL! We passed a Host Pointer to `launch_apply_spike_batch_impl`!
+    // Since this is just a test/stub, let's fix DayPhase to accept a device pointer.
+
+    // Run the Day Phase with the copied device pointer!
+    DayPhase::run_batch(&mut runtime, &barrier, gpu_schedule_buffer);
+    runtime.synchronize();
+
+    let axon_heads = runtime.vram.download_axon_head_index().unwrap();
+
+    // Free the test buffer
+    unsafe { genesis_runtime::ffi::gpu_free(gpu_schedule_buffer); }
+
+    // Verification:
+    // Local Axon: moved v_seg(2) * 100 ticks = 200. Initial was 10. Final = 210.
+    assert_eq!(axon_heads[0], 210, "Local axon should advance for 100 ticks");
+
+    // Ghost Axon:
+    // Started at Sentinel.
+    // Ignored for ticks 0, 1, 2, 3, 4. (Sentinel + 0 = Sentinel, theoretically, our Propagate just ignores Sentinel)
+    // At tick 5: apply_spike_batch resets it to 0!
+    // Then it moves for ticks 5, 6... 99 (95 ticks total of movement).
+    // 95 ticks * v_seg(2) = 190.
+    assert_eq!(axon_heads[1], 190, "Ghost axon should have been injected at tick 5 and propagated 95 times");
+}
+

@@ -1,5 +1,7 @@
 pub mod ffi;
 pub mod memory;
+pub mod network;
+pub mod orchestrator;
 
 use memory::VramState;
 use std::ptr;

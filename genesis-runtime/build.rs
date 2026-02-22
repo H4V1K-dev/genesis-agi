@@ -14,6 +14,7 @@ fn main() {
         .flag("-use_fast_math")
         .file("cuda/bindings.cu")
         .file("cuda/physics.cu")
+        .file("cuda/apply_spike_batch.cu")
         .compile("libgenesis_cuda.a");
 
     // Automatically link CUDA runtime

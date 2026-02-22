@@ -44,4 +44,10 @@ extern "C" {
         axon_heads: *mut c_void,
         stream: *mut c_void,
     );
+    pub fn launch_apply_spike_batch_impl(
+        num_spikes: u32,
+        schedule_indices: *mut c_void,
+        axon_heads: *mut c_void,
+        stream: *mut c_void,
+    );
 }
