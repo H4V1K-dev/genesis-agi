@@ -1,5 +1,4 @@
 use crate::Runtime;
-use genesis_baker::bake::reconnect_empty_dendrites;
 use tokio::sync::mpsc::error::TryRecvError;
 use crate::network::slow_path::{GeometryRequest, GeometryResponse, AckNewAxon};
 
@@ -33,17 +32,13 @@ impl NightPhase {
         let mut _weights = runtime.vram.download_dendrite_weights().expect("Failed to download weights");
         let mut _targets = runtime.vram.download_dendrite_targets().expect("Failed to download targets");
 
-        // 3. Sprouting (CPU/Cone Tracing)
-        println!("3. Sprouting & Nudging (CPU)");
-        reconnect_empty_dendrites(
-            &mut _targets,
-            &mut _weights,
-            runtime.vram.padded_n,
-            &runtime.neurons,
-            &runtime.axons,
-            &runtime.neuron_types,
-            runtime.master_seed,
-        );
+        // 3. Sprouting (IPC: baker subprocess reads weights/targets from disk,
+        // runs Cone Tracing, writes updated targets back. Runtime waits for ACK.)
+        println!("3. Sprouting & Nudging (IPC → baker subprocess)");
+        // TODO(B3-IPC): spawn baker process, pass shard_data_path, wait for completion
+        // For now: pass-through (weights/targets unchanged from B1 sort)
+        let _targets = _targets;
+        let _weights = _weights;
         
         // 4. Baking
         println!("4. Baking - Density repacking handled by genesis_baker.");

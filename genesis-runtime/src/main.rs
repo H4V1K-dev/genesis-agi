@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use genesis_runtime::config::{parse_shard_config, parse_simulation_config, parse_blueprints_config};
-use genesis_runtime::memory::{VramState, deserialize_positions, deserialize_axons};
+use genesis_runtime::memory::VramState;
 use genesis_runtime::{GenesisConstantMemory, VariantParameters, Runtime};
 use genesis_runtime::orchestrator::night_phase::NightPhase;
 use genesis_runtime::network::bsp::BspBarrier;
@@ -12,7 +12,6 @@ use genesis_runtime::network::socket::NodeSocket;
 
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::time::Instant;
 use genesis_runtime::network::telemetry::TelemetryServer;
 
@@ -76,16 +75,6 @@ async fn main() -> Result<()> {
     println!("[Node] Loading VRAM payload from {:?}...", cli.baked_dir);
     let state_bytes = std::fs::read(&state_path).context("Missing shard.state")?;
     let axons_bytes = std::fs::read(&axons_path).context("Missing shard.axons")?;
-
-    // Load CPU-side geometry for Night Phase Sprouting
-    let positions_path = cli.baked_dir.join("shard.positions");
-    let positions_bytes = std::fs::read(&positions_path).unwrap_or_default(); // Optional
-    let cpu_neurons = deserialize_positions(&positions_bytes)
-        .unwrap_or_else(|e| { eprintln!("[Node] Warning: could not load shard.positions: {}", e); vec![] });
-    let cpu_axons = deserialize_axons(&axons_bytes)
-        .unwrap_or_else(|e| { eprintln!("[Node] Warning: could not parse axons for CPU: {}", e); vec![] });
-    println!("[Node] CPU geometry: {} neurons, {} axons loaded for Night Phase.",
-        cpu_neurons.len(), cpu_axons.len());
 
     let num_virtual = sim_config.simulation.num_virtual_axons.unwrap_or(0);
     let vram = VramState::load_shard(&state_bytes, &axons_bytes, num_virtual)
@@ -188,35 +177,11 @@ async fn main() -> Result<()> {
     let v_seg = (sim_config.simulation.signal_speed_um_tick / sim_config.simulation.voxel_size_um) as u32;
     // master_seed: use a simple fixed seed for now (TODO: load from simulation.toml)
     let master_seed = 0x47454E455349530u64; // "GENESIS" as bytes
-    let cpu_neuron_types = blueprints.neuron_types.iter().map(|nt| {
-        use genesis_baker::parser::blueprints::NeuronType;
-        NeuronType {
-            name: nt.name.clone(),
-            threshold: nt.threshold,
-            rest_potential: nt.rest_potential,
-            leak_rate: nt.leak_rate,
-            refractory_period: nt.refractory_period as u8,
-            synapse_refractory_period: nt.synapse_refractory_period as u8,
-            conduction_velocity: 200,
-            signal_propagation_length: 10,
-            axon_growth_step: 12,
-            homeostasis_penalty: nt.homeostasis_penalty,
-            homeostasis_decay: nt.homeostasis_decay as u16,
-            slot_decay_ltm: nt.slot_decay_ltm as u8,
-            slot_decay_wm: nt.slot_decay_wm as u8,
-            sprouting_weight_distance: 0.5,
-
-            sprouting_weight_power: 0.4,
-            sprouting_weight_explore: 0.1,
-        }
-    }).collect::<Vec<_>>();
     let mut runtime = Runtime::new(
         vram,
         v_seg,
-        Arc::new(cpu_neurons),
-        Arc::new(cpu_axons),
-        Arc::new(cpu_neuron_types),
         master_seed,
+        Some(cli.baked_dir.clone()),
     );
 
     // 6. Enter the Ephemeral Loop

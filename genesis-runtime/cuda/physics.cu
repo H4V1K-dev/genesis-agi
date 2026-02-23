@@ -255,3 +255,120 @@ extern "C" void launch_apply_gsop(uint32_t padded_n, void *flags,
       padded_n, (uint8_t *)flags, (uint32_t *)dendrite_targets,
       (int16_t *)dendrite_weights, (uint8_t *)dendrite_timers);
 }
+
+// ============================================================================
+// 4. Sort & Prune Kernel — Night Phase Step 1 (Spec 07 §2.2.1)
+// ============================================================================
+// 1 thread = 1 neuron. Each thread gathers its 128 slots into registers,
+// performs an in-register Bitonic Sort (descending by abs(weight)), prunes
+// weak slots, then scatters back to Columnar Layout.
+//
+// Auto LTM/WM Promotion: after descending sort, strongest slots land in
+// indices 0..79 (LTM zone, low slot_decay) automatically. No extra logic.
+//
+// Pruning: slots with abs(weight) < prune_threshold → target_packed = 0.
+// These become empty slots for Night Phase Sprouting to refill.
+//
+// Register pressure: 128 u64 keys + 128 i16 signs ≈ 1280 bytes/thread.
+// Use blockSize=64 to stay within register file budget.
+// ============================================================================
+
+#define DENDRITE_SLOTS 128
+
+// Sort key: abs(weight) in high 16 bits (primary), target in mid 32 bits,
+// timer in low 8 bits. Sorting descending by key = descending by abs(weight).
+__device__ __forceinline__ uint64_t make_sort_key(int16_t w, uint32_t t, uint8_t tm) {
+  uint16_t aw = (w >= 0) ? (uint16_t)w : (uint16_t)(-w);
+  return ((uint64_t)aw << 40) | ((uint64_t)t << 8) | (uint64_t)tm;
+}
+
+__global__ void sort_and_prune_kernel(uint32_t padded_n,
+                                      uint32_t *dendrite_targets,
+                                      int16_t  *dendrite_weights,
+                                      uint8_t  *dendrite_timers,
+                                      uint16_t  prune_threshold) {
+  uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= padded_n) return;
+
+  // ── 1. Gather 128 slots from Columnar Layout into registers ──
+  uint64_t keys[DENDRITE_SLOTS];
+  int16_t  orig_w[DENDRITE_SLOTS]; // preserve sign for lossless round-trip
+
+  for (int s = 0; s < DENDRITE_SLOTS; s++) {
+    uint32_t col = s * padded_n + tid;
+    int16_t  w  = dendrite_weights[col];
+    uint32_t t  = dendrite_targets[col];
+    uint8_t  tm = dendrite_timers[col];
+    keys[s]   = make_sort_key(w, t, tm);
+    orig_w[s] = w;
+  }
+
+  // ── 2. Bitonic Sort N=128, descending ──
+  // log2(128)=7 stages × sub-passes. Fully unrolled by compiler.
+  for (int k = 2; k <= DENDRITE_SLOTS; k <<= 1) {         // merge width
+    for (int j = k >> 1; j > 0; j >>= 1) {                // comparison gap
+      for (int i = 0; i < DENDRITE_SLOTS; i++) {
+        int ixj = i ^ j;
+        if (ixj > i) {
+          // Descending when (i & k)==0, ascending when (i & k)!=0
+          bool want_desc = ((i & k) == 0);
+          bool cur_lt    = (keys[i] < keys[ixj]);
+          if (want_desc ? cur_lt : !cur_lt) {
+            uint64_t tk = keys[i];   keys[i]   = keys[ixj];   keys[ixj]   = tk;
+            int16_t  tw = orig_w[i]; orig_w[i] = orig_w[ixj]; orig_w[ixj] = tw;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 3. Prune: zero all slots with abs(weight) < threshold ──
+  // After descending sort, once we see a slot below threshold all subsequent
+  // slots are also below. Early break saves register reads.
+  for (int s = 0; s < DENDRITE_SLOTS; s++) {
+    uint16_t aw = (uint16_t)(keys[s] >> 40);
+    if (aw < prune_threshold) {
+      // Zero from here to end
+      for (int r = s; r < DENDRITE_SLOTS; r++) {
+        keys[r]   = 0;
+        orig_w[r] = 0;
+      }
+      break;
+    }
+  }
+
+  // ── 4. Scatter back to Columnar Layout ──
+  for (int s = 0; s < DENDRITE_SLOTS; s++) {
+    uint32_t col = s * padded_n + tid;
+    if (keys[s] == 0) {
+      dendrite_targets[col] = 0;
+      dendrite_weights[col] = 0;
+      dendrite_timers[col]  = 0;
+    } else {
+      // Round-trip: extract fields from key, restore sign
+      uint16_t aw = (uint16_t)(keys[s] >> 40);
+      int16_t  w  = (orig_w[s] < 0) ? -(int16_t)aw : (int16_t)aw;
+      uint32_t t  = (uint32_t)((keys[s] >> 8) & 0xFFFFFFFFu);
+      uint8_t  tm = (uint8_t)(keys[s] & 0xFF);
+      dendrite_targets[col] = t;
+      dendrite_weights[col] = w;
+      dendrite_timers[col]  = tm;
+    }
+  }
+}
+
+extern "C" void launch_sort_and_prune(uint32_t padded_n,
+                                      void *dendrite_targets,
+                                      void *dendrite_weights,
+                                      void *dendrite_timers,
+                                      int16_t prune_threshold,
+                                      void *stream) {
+  int blockSize = 64;
+  int numBlocks = (padded_n + blockSize - 1) / blockSize;
+  sort_and_prune_kernel<<<numBlocks, blockSize, 0, (cudaStream_t)stream>>>(
+      padded_n,
+      (uint32_t *)dendrite_targets,
+      (int16_t  *)dendrite_weights,
+      (uint8_t  *)dendrite_timers,
+      (uint16_t)prune_threshold);
+}

@@ -104,6 +104,9 @@ pub struct SimulationRuntime {
     pub signal_speed_um_tick: u32,
     #[serde(default = "default_segment_length_voxels")]
     pub segment_length_voxels: u32,
+    /// Night Phase trigger interval in ticks. 0 = never (static zone).
+    #[serde(default)]
+    pub night_interval_ticks: u32,
     pub num_virtual_axons: Option<u32>,
 }
 
@@ -137,11 +140,15 @@ pub struct NeuronTypeConfig {
     // Active Tail length per-variant (defaults to 10)
     #[serde(default = "default_propagation_length")]
     pub signal_propagation_length: u16,
+    // Pruning threshold for Night Phase Sort & Prune (defaults to 15)
+    #[serde(default = "default_prune_threshold")]
+    pub prune_threshold: u16,
 }
 
 fn default_gsop_pot() -> u16 { 74 }
 fn default_gsop_dep() -> u16 { 2 }
 fn default_propagation_length() -> u16 { 10 }
+fn default_prune_threshold() -> u16 { 15 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct BlueprintsConfig {

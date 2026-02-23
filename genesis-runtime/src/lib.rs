@@ -7,10 +7,6 @@ pub mod orchestrator;
 use memory::VramState;
 use std::ptr;
 use std::ffi::c_void;
-use std::sync::Arc;
-use genesis_baker::bake::neuron_placement::PlacedNeuron;
-use genesis_baker::bake::axon_growth::GrownAxon;
-use genesis_baker::parser::blueprints::NeuronType;
 use tokio::sync::{mpsc, oneshot};
 use crate::network::slow_path::{GeometryRequest, GeometryResponse};
 
@@ -53,25 +49,20 @@ impl Default for GenesisConstantMemory {
 pub struct Runtime {
     pub vram: VramState,
     pub v_seg: u32,
-    
-    // CPU Static Geometry for Night Phase Maintenance
-    pub neurons: Arc<Vec<PlacedNeuron>>,
-    pub axons: Arc<Vec<GrownAxon>>,
-    pub neuron_types: Arc<Vec<NeuronType>>,
     pub master_seed: u64,
+    /// Path to the shard data directory (for Night Phase IPC with baker subprocess)
+    pub shard_data_path: Option<std::path::PathBuf>,
     pub geometry_receiver: Option<mpsc::Receiver<(GeometryRequest, oneshot::Sender<GeometryResponse>)>>,
 }
 
 impl Runtime {
     pub fn new(
-        vram: VramState, 
+        vram: VramState,
         v_seg: u32,
-        neurons: Arc<Vec<PlacedNeuron>>,
-        axons: Arc<Vec<GrownAxon>>,
-        neuron_types: Arc<Vec<NeuronType>>,
         master_seed: u64,
+        shard_data_path: Option<std::path::PathBuf>,
     ) -> Self {
-        Self { vram, v_seg, neurons, axons, neuron_types, master_seed, geometry_receiver: None }
+        Self { vram, v_seg, master_seed, shard_data_path, geometry_receiver: None }
     }
 
     pub fn init_constants(constants: &GenesisConstantMemory) -> bool {

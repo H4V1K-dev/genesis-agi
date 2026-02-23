@@ -2,86 +2,10 @@ use crate::ffi;
 use std::ffi::c_void;
 use genesis_core::constants::MAX_DENDRITE_SLOTS;
 use genesis_core::layout::padded_n;
-use genesis_baker::bake::neuron_placement::PlacedNeuron;
-use genesis_baker::bake::axon_growth::GrownAxon;
 
-/// Десериализует `shard.positions` (4 байта * N: packed_pos u32) →
-/// `Vec<PlacedNeuron>`.
-/// Формат: [packed_pos: u32; N] без заголовка.
-pub fn deserialize_positions(bytes: &[u8]) -> anyhow::Result<Vec<PlacedNeuron>> {
-    if bytes.len() % 4 != 0 {
-        anyhow::bail!("shard.positions size {} is not divisible by 4", bytes.len());
-    }
-    let n = bytes.len() / 4;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let packed = u32::from_le_bytes(bytes[i*4..i*4+4].try_into().unwrap());
-        // PlacedNeuron stores packed_pos directly; type_idx comes from bits 28..31
-        let type_idx = ((packed >> 28) & 0xF) as usize;
-        out.push(PlacedNeuron { position: packed, type_idx, layer_name: String::new() });
-    }
-    Ok(out)
-}
-
-/// Десериализует `shard.axons` → `Vec<GrownAxon>`.
-///
-/// Формат (зеркало serialize_axons из baker/src/main.rs):
-/// ```
-/// [count: u32]
-/// per-axon {
-///   tip_x:   u16
-///   tip_y:   u16
-///   tip_z:   u16
-///   length:  u32  (число сегментов)
-///   segments: [u32; length]  (PackedPositions)
-/// }
-/// ```
-/// soma_idx и type_idx извлекаются где возможно (type из первого сегмента bits 28..31).
-pub fn deserialize_axons(bytes: &[u8]) -> anyhow::Result<Vec<GrownAxon>> {
-    if bytes.len() < 4 {
-        anyhow::bail!("shard.axons too small: {} bytes", bytes.len());
-    }
-    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let mut axons = Vec::with_capacity(count);
-    let mut offset = 4usize;
-
-    for soma_idx in 0..count {
-        if offset + 10 > bytes.len() {
-            anyhow::bail!("shard.axons truncated at axon {}", soma_idx);
-        }
-        let tip_x = u16::from_le_bytes(bytes[offset..offset+2].try_into().unwrap()) as u32;
-        let tip_y = u16::from_le_bytes(bytes[offset+2..offset+4].try_into().unwrap()) as u32;
-        let tip_z = u16::from_le_bytes(bytes[offset+4..offset+6].try_into().unwrap()) as u32;
-        let seg_count = u32::from_le_bytes(bytes[offset+6..offset+10].try_into().unwrap()) as usize;
-        offset += 10;
-
-        if offset + seg_count * 4 > bytes.len() {
-            anyhow::bail!("shard.axons: axon {} claims {} segs but bytes run out", soma_idx, seg_count);
-        }
-        let mut segments = Vec::with_capacity(seg_count);
-        for _ in 0..seg_count {
-            let seg = u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap());
-            segments.push(seg);
-            offset += 4;
-        }
-
-        // Extract type from the type bits of the first segment (bits 28..31)
-        let type_idx = segments.first().map(|&s| ((s >> 28) & 0xF) as usize).unwrap_or(0);
-
-        axons.push(GrownAxon {
-            soma_idx,
-            type_idx,
-            tip_x,
-            tip_y,
-            tip_z,
-            length_segments: seg_count as u32,
-            segments,
-        });
-    }
-    Ok(axons)
-}
 
 /// Typesafe wrapper over device pointers for the GPU SoA layout.
+
 pub struct VramState {
     pub padded_n: usize,
     
