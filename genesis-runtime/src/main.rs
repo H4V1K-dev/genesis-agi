@@ -186,7 +186,13 @@ async fn main() -> Result<()> {
 
     // 6. Enter the Ephemeral Loop
     let mut current_tick = 0u64;
-    let night_interval = sim_config.simulation.sync_batch_ticks; // Run Night Phase every sync batch
+    let night_interval = sim_config.simulation.night_interval_ticks;
+    let prune_threshold: i16 = blueprints.neuron_types.first()
+        .map(|nt| nt.prune_threshold as i16)
+        .unwrap_or(15);
+    println!("[Node] Night Phase: interval={} ticks, prune_threshold={}",
+        if night_interval == 0 { "DISABLED".to_string() } else { night_interval.to_string() },
+        prune_threshold);
 
     
     println!("[Node] Engine Online. Starting Ephemeral Loop.");
@@ -223,8 +229,8 @@ async fn main() -> Result<()> {
         current_tick += 1;
         let real_ticks_completed = current_tick * sync_batch_ticks as u64;
 
-        // 6.2 Night Phase Check
-        let is_night = NightPhase::check_and_run(&mut runtime, 0, night_interval, real_ticks_completed);
+        // 6.2 Night Phase Check (trigger from config, not hardcoded)
+        let is_night = NightPhase::check_and_run(&mut runtime, 0, night_interval, real_ticks_completed, prune_threshold);
         if is_night {
             // Re-sync local states if needed
             println!("[Node] Night Phase concluded at tick {}.", real_ticks_completed);

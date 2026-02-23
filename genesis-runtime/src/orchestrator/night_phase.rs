@@ -5,25 +5,24 @@ use crate::network::slow_path::{GeometryRequest, GeometryResponse, AckNewAxon};
 pub struct NightPhase;
 
 impl NightPhase {
-    pub fn check_and_run(runtime: &mut Runtime, zone_id: u32, night_interval_ticks: u32, current_total_ticks: u64) -> bool {
+    pub fn check_and_run(runtime: &mut Runtime, zone_id: u32, night_interval_ticks: u32, current_total_ticks: u64, prune_threshold: i16) -> bool {
         if night_interval_ticks == 0 {
             return false;
         }
 
         if current_total_ticks > 0 && current_total_ticks % (night_interval_ticks as u64) == 0 {
-            Self::run_maintenance_pipeline(runtime, zone_id);
+            Self::run_maintenance_pipeline(runtime, zone_id, prune_threshold);
             return true;
         }
 
         false
     }
 
-    fn run_maintenance_pipeline(runtime: &mut Runtime, zone_id: u32) {
+    fn run_maintenance_pipeline(runtime: &mut Runtime, zone_id: u32, prune_threshold: i16) {
         println!("Night Phase triggered for zone {}: Running Maintenance Pipeline", zone_id);
         
         // 1. Sort & Prune (GPU)
-        println!("1. Sort & Prune (GPU)");
-        let prune_threshold: i16 = 15; // TODO: Fetch from Zone Configuration
+        println!("1. Sort & Prune (GPU, threshold={})", prune_threshold);
         runtime.vram.run_sort_and_prune(prune_threshold);
         runtime.synchronize(); // Ensure kernel completes before download
 
