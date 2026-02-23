@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use genesis_runtime::config::{parse_shard_config, parse_simulation_config, parse_blueprints_config};
-use genesis_runtime::memory::VramState;
+use genesis_runtime::memory::{VramState, deserialize_positions, deserialize_axons};
 use genesis_runtime::{GenesisConstantMemory, VariantParameters, Runtime};
 use genesis_runtime::orchestrator::night_phase::NightPhase;
 use genesis_runtime::network::bsp::BspBarrier;
@@ -72,6 +72,16 @@ async fn main() -> Result<()> {
     println!("[Node] Loading VRAM payload from {:?}...", cli.baked_dir);
     let state_bytes = std::fs::read(&state_path).context("Missing shard.state")?;
     let axons_bytes = std::fs::read(&axons_path).context("Missing shard.axons")?;
+
+    // Load CPU-side geometry for Night Phase Sprouting
+    let positions_path = cli.baked_dir.join("shard.positions");
+    let positions_bytes = std::fs::read(&positions_path).unwrap_or_default(); // Optional
+    let cpu_neurons = deserialize_positions(&positions_bytes)
+        .unwrap_or_else(|e| { eprintln!("[Node] Warning: could not load shard.positions: {}", e); vec![] });
+    let cpu_axons = deserialize_axons(&axons_bytes)
+        .unwrap_or_else(|e| { eprintln!("[Node] Warning: could not parse axons for CPU: {}", e); vec![] });
+    println!("[Node] CPU geometry: {} neurons, {} axons loaded for Night Phase.",
+        cpu_neurons.len(), cpu_axons.len());;
 
     let vram = VramState::load_shard(&state_bytes, &axons_bytes)
         .context("Failed to push shard data to GPU VRAM")?;
@@ -169,33 +179,50 @@ async fn main() -> Result<()> {
 
     // 5.1 Initialize Engine Runtime
     let v_seg = (sim_config.simulation.signal_speed_um_tick / sim_config.simulation.voxel_size_um) as u32;
+    // master_seed: use a simple fixed seed for now (TODO: load from simulation.toml)
+    let master_seed = 0x47454E455349530u64; // "GENESIS" as bytes
+    let cpu_neuron_types = blueprints.neuron_types.iter().map(|nt| {
+        use genesis_baker::parser::blueprints::NeuronType;
+        NeuronType {
+            name: nt.name.clone(),
+            threshold: nt.threshold,
+            rest_potential: nt.rest_potential,
+            leak_rate: nt.leak_rate,
+            refractory_period: nt.refractory_period as u8,
+            synapse_refractory_period: nt.synapse_refractory_period as u8,
+            conduction_velocity: 200,
+            signal_propagation_length: 10,
+            axon_growth_step: 12,
+            homeostasis_penalty: nt.homeostasis_penalty,
+            homeostasis_decay: nt.homeostasis_decay as u16,
+            slot_decay_ltm: nt.slot_decay_ltm as u8,
+            slot_decay_wm: nt.slot_decay_wm as u8,
+            sprouting_weight_distance: 0.5,
+
+            sprouting_weight_power: 0.4,
+            sprouting_weight_explore: 0.1,
+        }
+    }).collect::<Vec<_>>();
     let mut runtime = Runtime::new(
         vram,
         v_seg,
-        Arc::new(vec![]),
-        Arc::new(vec![]),
-        Arc::new(vec![]),
-        0, // master seed
+        Arc::new(cpu_neurons),
+        Arc::new(cpu_axons),
+        Arc::new(cpu_neuron_types),
+        master_seed,
     );
 
     // 6. Enter the Ephemeral Loop
     let mut current_tick = 0u64;
-    let night_interval = 10000; // placeholder
+    let night_interval = sim_config.simulation.sync_batch_ticks; // Run Night Phase every sync batch
+
     
     println!("[Node] Engine Online. Starting Ephemeral Loop.");
 
     loop {
         let _loop_start = Instant::now();
 
-        // 6.1 Night Phase Check
-        let is_night = NightPhase::check_and_run(&mut runtime, 0, night_interval, current_tick);
-
-        if is_night {
-            // Re-sync local states if needed
-            println!("[Node] Night Phase concluded at tick {}.", current_tick);
-        }
-
-        // 6.2 Day Phase: GPU Execution & Network Sync
+        // 6.1 Day Phase: GPU Execution & Network Sync
         // We utilize the GPU async execution cycle.
         genesis_runtime::orchestrator::day_phase::DayPhase::run_batch(
             &mut runtime,
@@ -207,6 +234,14 @@ async fn main() -> Result<()> {
         ).await.context("Day Phase execution failed")?;
 
         current_tick += 1;
+        let real_ticks_completed = current_tick * sync_batch_ticks as u64;
+
+        // 6.2 Night Phase Check
+        let is_night = NightPhase::check_and_run(&mut runtime, 0, night_interval, real_ticks_completed);
+        if is_night {
+            // Re-sync local states if needed
+            println!("[Node] Night Phase concluded at tick {}.", real_ticks_completed);
+        }
 
         // Throttle to simulated real time (e.g. 10ms network barrier limits display speed)
         // Here we just print per batch completed.

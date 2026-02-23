@@ -11,4 +11,4 @@ d = 128
 h = 1024
 
 [neighbors]
-x_plus = "127.0.0.1:8002"
+# Solo mode — no peers, BSP barrier syncs instantly
