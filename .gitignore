@@ -10,6 +10,7 @@ Cargo.lock
 # Baked blobs (бинарные — не в VCS)
 *.state
 *.axons
+*.positions
 checkpoint_*.bin
 checkpoint_*.bin.tmp
 

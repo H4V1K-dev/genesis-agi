@@ -1,13 +1,15 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use genesis_runtime::config::{parse_shard_config, parse_simulation_config};
+use genesis_runtime::config::{parse_shard_config, parse_simulation_config, parse_blueprints_config};
 use genesis_runtime::memory::VramState;
+use genesis_runtime::{GenesisConstantMemory, VariantParameters, Runtime};
 use genesis_runtime::orchestrator::night_phase::NightPhase;
 use genesis_runtime::network::bsp::BspBarrier;
-use genesis_runtime::network::router::{SpikeRouter, GhostTarget};
+use genesis_runtime::network::router::SpikeRouter;
+
 use genesis_runtime::network::geometry_client::GeometryServer;
 use genesis_runtime::network::socket::NodeSocket;
-use genesis_runtime::Runtime;
+
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +38,10 @@ struct Cli {
     /// Directory containing baked binary blocks (.state, .axons)
     #[arg(short = 'b', long, default_value = "baked/")]
     baked_dir: PathBuf,
+
+    /// Path to the blueprints configuration (neuron type LUT)
+    #[arg(long, default_value = "genesis-runtime/examples/blueprints.toml")]
+    blueprints: PathBuf,
 }
 
 #[tokio::main]
@@ -128,8 +134,40 @@ async fn main() -> Result<()> {
 
     let mut gpu_schedule_buffer = vec![0u8; sync_batch_ticks * 1024 * 4];
 
-    // 5. Initialize Engine Runtime
-    // (We pass empty CPU lists for neurons/axons because the Baker hasn't supplied them in this simplified harness)
+    // 5. Load Blueprints and Upload Constant Memory to GPU
+    let blueprints = parse_blueprints_config(&cli.blueprints)
+        .with_context(|| format!("Failed to load blueprints: {:?}", cli.blueprints))?;
+
+    let mut const_mem = GenesisConstantMemory::default();
+    // Fill up to 4 variants from blueprints (indices 0..3 = Variant bits 2-3)
+    for (i, nt) in blueprints.neuron_types.iter().take(4).enumerate() {
+        const_mem.variants[i] = VariantParameters {
+            threshold:            nt.threshold,
+            rest_potential:       nt.rest_potential,
+            leak:                 nt.leak_rate,
+            homeostasis_penalty:  nt.homeostasis_penalty,
+            homeostasis_decay:    nt.homeostasis_decay,
+            gsop_potentiation:    nt.gsop_potentiation,
+            gsop_depression:      nt.gsop_depression,
+            refractory_period:    nt.refractory_period,
+            synapse_refractory:   nt.synapse_refractory_period,
+            slot_decay_ltm:       nt.slot_decay_ltm,
+            slot_decay_wm:        nt.slot_decay_wm,
+            _padding:             [0; 4],
+        };
+    }
+    // Inertia LUT: linearly decreasing resistance — stronger weights change slower
+    // Rank 0 (weak, abs<2048): inertia=128 (full delta), rank 15 (strong): inertia=8
+    for rank in 0..16usize {
+        const_mem.inertia_lut[rank] = (128u32.saturating_sub(rank as u32 * 8)) as u8;
+    }
+
+    if !Runtime::init_constants(&const_mem) {
+        anyhow::bail!("Failed to upload GenesisConstantMemory to GPU");
+    }
+    println!("[Node] Constant memory uploaded ({} neuron types).", blueprints.neuron_types.len().min(4));
+
+    // 5.1 Initialize Engine Runtime
     let v_seg = (sim_config.simulation.signal_speed_um_tick / sim_config.simulation.voxel_size_um) as u32;
     let mut runtime = Runtime::new(
         vram,
