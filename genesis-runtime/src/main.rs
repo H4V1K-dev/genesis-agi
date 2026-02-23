@@ -45,6 +45,11 @@ struct Cli {
     /// Actively injects a sweeping signal into Virtual Axons each sync_batch
     #[arg(long)]
     mock_retina: bool,
+
+    /// Unix socket path for genesis-baker-daemon (optional).
+    /// If not provided, Night Phase Sprouting is skipped (Sort & Prune still runs).
+    #[arg(long)]
+    baker_socket: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -183,6 +188,25 @@ async fn main() -> Result<()> {
         master_seed,
         Some(cli.baked_dir.clone()),
     );
+
+    // 5.2 Connect to baker daemon (optional)
+    if let Some(ref socket_path) = cli.baker_socket {
+        let zone_u16 = config.zone_id.parse::<u16>().unwrap_or_else(|_| {
+            eprintln!("[Node] Warning: zone_id '{}' is not numeric, using 0 for SHM name", config.zone_id);
+            0
+        });
+        match genesis_runtime::ipc::BakerClient::connect(zone_u16, socket_path) {
+            Ok(client) => {
+                println!("[Node] Baker daemon connected via {:?}", socket_path);
+                runtime.baker_client = Some(client);
+            }
+            Err(e) => {
+                eprintln!("[Node] Warning: cannot connect to baker daemon: {e}. Sprouting disabled.");
+            }
+        }
+    } else {
+        println!("[Node] No --baker-socket provided. Night Phase Sprouting disabled.");
+    }
 
     // 6. Enter the Ephemeral Loop
     let mut current_tick = 0u64;

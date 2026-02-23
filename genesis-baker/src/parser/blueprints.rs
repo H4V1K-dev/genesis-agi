@@ -10,7 +10,7 @@ pub struct Blueprints {
 /// Один [[neuron_type]] блок из blueprints.toml.
 /// Все числовые параметры соответствуют Integer Physics (02_configuration.md §6).
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct NeuronType {
     /// Уникальное имя типа. Используется как ключ в anatomy.toml [[layer.composition]].
     pub name: String,

@@ -31,13 +31,18 @@ impl NightPhase {
         let mut _weights = runtime.vram.download_dendrite_weights().expect("Failed to download weights");
         let mut _targets = runtime.vram.download_dendrite_targets().expect("Failed to download targets");
 
-        // 3. Sprouting (IPC: baker subprocess reads weights/targets from disk,
-        // runs Cone Tracing, writes updated targets back. Runtime waits for ACK.)
-        println!("3. Sprouting & Nudging (IPC → baker subprocess)");
-        // TODO(B3-IPC): spawn baker process, pass shard_data_path, wait for completion
-        // For now: pass-through (weights/targets unchanged from B1 sort)
-        let _targets = _targets;
-        let _weights = _weights;
+        // 3. Sprouting (IPC → genesis-baker-daemon via SHM + Unix socket)
+        println!("3. Sprouting & Nudging (IPC → baker daemon)");
+        let padded_n = runtime.vram.padded_n;
+        let sprouted_targets = runtime.baker_client
+            .as_mut()
+            .and_then(|bc| {
+                match bc.run_night(&_weights, &_targets, padded_n, std::time::Duration::from_secs(60)) {
+                    Ok(t) => { println!("   Baker Sprouting complete."); Some(t) }
+                    Err(e) => { eprintln!("   [warn] Baker IPC failed: {e}. Skipping Sprouting."); None }
+                }
+            })
+            .unwrap_or(_targets); // no baker configured → pass-through
         
         // 4. Baking
         println!("4. Baking - Density repacking handled by genesis_baker.");
@@ -50,7 +55,7 @@ impl NightPhase {
         println!("5. PCIe Upload (RAM -> VRAM)");
         // Upload the mutated structural data back to the GPU
         runtime.vram.upload_dendrite_weights(&_weights).expect("Failed to upload weights");
-        runtime.vram.upload_dendrite_targets(&_targets).expect("Memcpy async failed");
+        runtime.vram.upload_dendrite_targets(&sprouted_targets).expect("Memcpy async failed");
         
         // Ensure network streams are ready
         runtime.synchronize();

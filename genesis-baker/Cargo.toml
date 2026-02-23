@@ -10,6 +10,10 @@ license.workspace = true
 name = "baker"
 path = "src/main.rs"
 
+[[bin]]
+name = "genesis-baker-daemon"
+path = "src/bin/daemon.rs"
+
 [dependencies]
 genesis-core = { workspace = true }
 toml = "0.8"
@@ -18,3 +22,4 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 wyhash = "0.5"
 glam = "0.29"
+libc = "0.2"

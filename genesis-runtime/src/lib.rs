@@ -1,5 +1,6 @@
 pub mod ffi;
 pub mod config;
+pub mod ipc;
 pub mod memory;
 pub mod network;
 pub mod orchestrator;
@@ -52,6 +53,8 @@ pub struct Runtime {
     pub master_seed: u64,
     /// Path to the shard data directory (for Night Phase IPC with baker subprocess)
     pub shard_data_path: Option<std::path::PathBuf>,
+    /// IPC client for baker daemon (None if baker not configured)
+    pub baker_client: Option<crate::ipc::BakerClient>,
     pub geometry_receiver: Option<mpsc::Receiver<(GeometryRequest, oneshot::Sender<GeometryResponse>)>>,
 }
 
@@ -62,7 +65,7 @@ impl Runtime {
         master_seed: u64,
         shard_data_path: Option<std::path::PathBuf>,
     ) -> Self {
-        Self { vram, v_seg, master_seed, shard_data_path, geometry_receiver: None }
+        Self { vram, v_seg, master_seed, shard_data_path, baker_client: None, geometry_receiver: None }
     }
 
     pub fn init_constants(constants: &GenesisConstantMemory) -> bool {

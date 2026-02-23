@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 genesis-core = { workspace = true }
+libc = "0.2"
 anyhow = "1"
 tokio = { version = "1.49.0", features = ["full"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
