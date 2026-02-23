@@ -8,7 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-02-23
+
+### Added
+- **Night Phase IPC Baker Daemon** — `genesis-baker-daemon` executable running in background
+- **Shared Memory Protocol (SHM)** — zero-copy transfer of weights and targets between CUDA runtime and CPU baker
+- **Unix Sockets** — for JSON control messages (`night_start`, `night_done`) synchronization
+- **Sort & Prune CUDA Kernel** — O(1) register Bitonic Sort (N=128) per neuron to auto-promote LTM/WM and prune weak connections
+- Integration E2E IPC tests verifying full orchestrator pipeline handoff
+
 ## [0.5.0] - 2026-02-23
+
 
 ### Added
 - **Smart Axon Growth: Cone Tracing** — iterative, biologically plausible axon sprouting

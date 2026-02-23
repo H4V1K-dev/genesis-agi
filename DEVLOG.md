@@ -13,8 +13,8 @@
 - [x] Genesis Monitor — WebSocket telemetry server
 - [x] Genesis IDE — Bevy 3D viewer, camera, spike glow
 - [x] Smart Axon Growth — Cone Tracing, SpatialGrid, piecewise geometry
-- [ ] Night Phase CPU Sprouting — full reconnect (not a stub)
-- [ ] End-to-end: baker → runtime → GPU
+- [x] Night Phase CPU Sprouting — full reconnect (not a stub)
+- [x] End-to-end: baker → runtime → GPU
 - [ ] First learning experiment
 - [ ] V 1.0.0 Release
 
