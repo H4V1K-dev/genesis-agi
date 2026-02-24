@@ -95,6 +95,9 @@ pub struct NeuronType {
     #[serde(default = "default_sprouting_exp")]
     pub sprouting_weight_explore: f32,
 
+    #[serde(default = "default_sprouting_type")]
+    pub sprouting_weight_type: f32,
+
     // --- Night Phase ---
     #[serde(default = "default_prune_threshold")]
     pub prune_threshold: u16,
@@ -116,6 +119,7 @@ fn default_gsop_dep() -> u16 { 2 }
 fn default_sprouting_dist() -> f32 { 0.5 }
 fn default_sprouting_power() -> f32 { 0.4 }
 fn default_sprouting_exp() -> f32 { 0.1 }
+fn default_sprouting_type() -> f32 { 0.2 }
 fn default_prune_threshold() -> u16 { 15 }
 
 impl NeuronType {

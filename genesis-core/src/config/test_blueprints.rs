@@ -114,6 +114,7 @@ fn test_blueprints_whitelist_and_initial_weight() {
     assert_eq!(e.dendrite_whitelist, vec!["Inhibitory", "Relay"]);
     assert_eq!(e.initial_synapse_weight, 90);
     assert!(!e.is_inhibitory);
+    assert_eq!(e.sprouting_weight_type, 0.2); // default
 
     let i = &bp.neuron_types[1];
     assert!(i.dendrite_whitelist.is_empty()); // default = []

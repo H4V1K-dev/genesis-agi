@@ -2,7 +2,7 @@ use crate::bake::axon_growth::GrownAxon;
 use crate::bake::layout::ShardStateSoA;
 use crate::bake::neuron_placement::PlacedNeuron;
 use crate::bake::seed::entity_seed;
-use crate::bake::sprouting::{sprouting_score, voxel_dist, SproutingWeights};
+use crate::bake::sprouting::{compute_power_index, sprouting_score, voxel_dist, SproutingWeights};
 use crate::parser::blueprints::NeuronType;
 use genesis_core::constants::MAX_DENDRITE_SLOTS;
 use genesis_core::coords::{pack_target, unpack_target};
@@ -138,7 +138,10 @@ pub fn connect_dendrites(
                             master_seed,
                             (soma_id.wrapping_mul(31).wrapping_add(axon_idx)) as u32,
                         );
-                        let score = sprouting_score(min_dist, 0.0, epoch_seed, &cfg);
+                        
+                        let is_same_type = ax.type_idx == neuron.type_idx;
+                        let type_affinity = nt.type_affinity;
+                        let score = sprouting_score(min_dist, 0.0, epoch_seed, &cfg, type_affinity, is_same_type);
                         
                         seen_axons.insert(axon_idx);
                         candidates.push(Candidate { axon_idx, segment_idx: best_seg_idx, score });
@@ -185,6 +188,7 @@ pub fn connect_dendrites(
 pub fn reconnect_empty_dendrites(
     targets: &mut [u32],
     weights: &mut [i16],
+    downloaded_weights: &[i16],
     padded_n: usize,
     neurons: &[PlacedNeuron],
     axons: &[GrownAxon],
@@ -255,6 +259,17 @@ pub fn reconnect_empty_dendrites(
                             continue;
                         }
 
+                        // Type Whitelist Filter
+                        if !nt.dendrite_whitelist.is_empty() {
+                            let source_type_name = neuron_types
+                                .get(ax.type_idx)
+                                .map(|t| t.name.as_str())
+                                .unwrap_or("");
+                            if !nt.dendrite_whitelist.iter().any(|w| w == source_type_name) {
+                                continue;
+                            }
+                        }
+
                         let mut min_dist = f32::MAX;
                         let mut best_seg_idx = 0;
                         
@@ -278,8 +293,17 @@ pub fn reconnect_empty_dendrites(
                             master_seed,
                             (soma_id.wrapping_mul(31).wrapping_add(axon_idx)) as u32,
                         );
-                        // TODO: Pass actual target power from downloaded weights
-                        let score = sprouting_score(min_dist, 0.0, epoch_seed, &cfg);
+                        
+                        let target_soma = ax.soma_idx;
+                        let target_power = if target_soma < padded_n {
+                            compute_power_index(target_soma, downloaded_weights, padded_n)
+                        } else {
+                            0.0
+                        };
+                        
+                        let is_same_type = ax.type_idx == neuron.type_idx;
+                        let type_affinity = nt.type_affinity;
+                        let score = sprouting_score(min_dist, target_power, epoch_seed, &cfg, type_affinity, is_same_type);
                         candidates.push(Candidate { axon_idx, segment_idx: best_seg_idx, score });
                     }
                 }

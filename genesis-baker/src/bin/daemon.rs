@@ -165,10 +165,13 @@ fn main() -> Result<()> {
                     );
                 }
 
+                let downloaded_weights = weights.clone();
+
                 // Run Sprouting
                 reconnect_empty_dendrites(
                     &mut targets,
                     &mut weights,
+                    &downloaded_weights,
                     padded_n,
                     &neurons,
                     &axons,
