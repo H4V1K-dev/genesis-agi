@@ -57,31 +57,10 @@ pub fn parse_shard_config(path: &Path) -> Result<InstanceConfig> {
 
 // ---- Simulation Configuration (Runtime specifics) ----
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct SimulationConfigRoot {
-    pub simulation: SimulationRuntime,
-}
+pub use genesis_core::config::SimulationConfig;
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct SimulationRuntime {
-    pub master_seed: String,
-    pub sync_batch_ticks: u32,
-    pub voxel_size_um: u32,
-    pub signal_speed_um_tick: u32,
-    #[serde(default = "default_segment_length_voxels")]
-    pub segment_length_voxels: u32,
-    /// Night Phase trigger interval in ticks. 0 = never (static zone).
-    #[serde(default)]
-    pub night_interval_ticks: u32,
-    pub num_virtual_axons: Option<u32>,
-}
-
-fn default_segment_length_voxels() -> u32 { 5 }
-
-pub fn parse_simulation_config(path: &Path) -> Result<SimulationConfigRoot> {
-    let content = fs::read_to_string(path)?;
-    let config: SimulationConfigRoot = toml::from_str(&content)?;
-    Ok(config)
+pub fn parse_simulation_config(path: &Path) -> Result<SimulationConfig> {
+    SimulationConfig::load(path).map_err(|e| anyhow::anyhow!(e))
 }
 
 // ---- Blueprints Configuration (Neuron Types for GPU LUT) ----
