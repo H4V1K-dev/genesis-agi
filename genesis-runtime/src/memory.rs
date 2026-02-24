@@ -1,8 +1,7 @@
 use crate::ffi;
 use std::ffi::c_void;
 use genesis_core::constants::MAX_DENDRITE_SLOTS;
-use genesis_core::layout::padded_n;
-
+use genesis_core::layout::{padded_n, StateFileHeader, AxonsFileHeader};
 
 /// Typesafe wrapper over device pointers for the GPU SoA layout.
 
@@ -42,25 +41,20 @@ impl VramState {
     /// Loads the raw binary `.state` and `.axons` blobs from baker and 
     /// zero-copy migrates them into GPU VRAM (SoA layout).
     pub fn load_shard(state_bytes: &[u8], axons_bytes: &[u8], num_virtual_axons: u32) -> anyhow::Result<Self> {
-        if axons_bytes.len() < 4 {
-            anyhow::bail!("axons_bytes too small");
-        }
-        let num_axons = u32::from_le_bytes(axons_bytes[0..4].try_into().unwrap()) as usize;
+        let axons_header = AxonsFileHeader::from_bytes(axons_bytes)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let num_axons = axons_header.total_axons as usize;
+
         let virtual_offset = num_axons.saturating_sub(num_virtual_axons as usize) as u32;
         let pa = padded_n(num_axons);
+
+        let state_header = StateFileHeader::from_bytes(state_bytes)
+            .map_err(|e| anyhow::anyhow!(e))?;
         
-        // Equation from byte_size(): pn * 4 + pn + pn * 4 + pn + pn * 4 + (pn * 128) * (4 + 2 + 1) + pa * 4 
-        // = pn * 14 + pn * 896 + pa * 4 = pn * 910 + pa * 4
-        let base_len = state_bytes.len().checked_sub(pa * 4)
-            .ok_or_else(|| anyhow::anyhow!("State file too small for axons"))?;
-            
-        if base_len % 910 != 0 {
-            anyhow::bail!("State file size mismatch: {} % 910 != 0", base_len);
-        }
-        let pn = base_len / 910;
+        let pn = state_header.padded_n as usize;
         let dc = MAX_DENDRITE_SLOTS * pn;
 
-        let mut offset = 0;
+        let mut offset = state_header.header_size as usize;
         let mut allocate_and_copy = |slice_len: usize| -> anyhow::Result<*mut c_void> {
             let ptr = unsafe { ffi::gpu_malloc(slice_len) };
             if ptr.is_null() {

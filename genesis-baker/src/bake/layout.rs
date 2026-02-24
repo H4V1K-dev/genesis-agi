@@ -91,7 +91,14 @@ impl ShardStateSoA {
     ///                   → soma_to_axon → dendrite_targets → dendrite_weights
     ///                   → dendrite_timers → axon_heads
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.byte_size());
+        let header = genesis_core::layout::StateFileHeader::new(
+            self.padded_n as u32,
+            self.total_axons as u32,
+        );
+        let header_bytes = header.as_bytes();
+        let mut out = Vec::with_capacity(self.byte_size() + header_bytes.len());
+
+        out.extend_from_slice(header_bytes);
 
         for &v in &self.voltage {
             out.extend_from_slice(&v.to_le_bytes());

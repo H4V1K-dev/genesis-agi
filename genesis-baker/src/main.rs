@@ -192,32 +192,22 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
         axons_bytes.len() as f64 / 1_048_576.0
     );
 
-    // --- 11. Write .positions blob (IDE viewport) ---
-    // Format: [u32; N] packed_pos per neuron. Layout: [type(4b)|z(8b)|y(10b)|x(10b)]
-    let positions_bytes = serialize_positions(&neurons, num_virtual, &sim);
-    atomic_write(out_dir.join("shard.positions"), &positions_bytes)?;
-    println!(
-        "[baker] ✓ Written: shard.positions ({} neurons + {} virtual, {:.1} KB)",
-        neurons.len(),
-        num_virtual,
-        positions_bytes.len() as f64 / 1024.0
-    );
-
     println!("[baker] Done.");
     Ok(())
 }
 
 /// Формат файла `.axons`:
-/// - Header: `total_axons: u32`
+/// - Header: `AxonsFileHeader` (8 bytes)
 /// - Array of `total_axons`:
 ///   - tip_x: u16, tip_y: u16, tip_z: u16
 ///   - length: u32 (N)
 ///   - segments: [u32; N] (PackedPositions)
 fn serialize_axons(axons: &[bake::axon_growth::GrownAxon]) -> Vec<u8> {
-    // Оцениваем размер: 4 байта заголовок + для каждого (10 байт заголовок + 4 байта на сегмент)
-    let estimated_size = 4 + axons.iter().map(|ax| 10 + ax.segments.len() * 4).sum::<usize>();
+    // Оцениваем размер: 8 байт заголовок + для каждого (10 байт заголовок + 4 байта на сегмент)
+    let estimated_size = 8 + axons.iter().map(|ax| 10 + ax.segments.len() * 4).sum::<usize>();
     let mut out = Vec::with_capacity(estimated_size);
-    out.extend_from_slice(&(axons.len() as u32).to_le_bytes());
+    let header = genesis_core::layout::AxonsFileHeader::new(axons.len() as u32);
+    out.extend_from_slice(header.as_bytes());
     for ax in axons {
         out.extend_from_slice(&(ax.tip_x as u16).to_le_bytes());
         out.extend_from_slice(&(ax.tip_y as u16).to_le_bytes());
@@ -241,39 +231,3 @@ fn atomic_write(path: impl AsRef<Path>, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Сериализует позиции нейронов для IDE viewport.
-/// Формат: [u32; N] — packed_pos для каждого нейрона.
-/// Layout packed_pos: [type(4b) | z(8b) | y(10b) | x(10b)] — little-endian.
-/// IDE декодирует: x = pos & 0x3FF, y = (pos >> 10) & 0x3FF, z = (pos >> 20) & 0xFF, type = pos >> 28.
-fn serialize_positions(
-    neurons: &[bake::neuron_placement::PlacedNeuron],
-    num_virtual: u32,
-    sim: &parser::simulation::SimulationConfig,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity((neurons.len() + num_virtual as usize) * 4);
-    for n in neurons {
-        out.extend_from_slice(&n.position.to_le_bytes());
-    }
-
-    // Append virtual axons as pseudo-neurons for visualization
-    if num_virtual > 0 {
-        let world_w_vox = sim.world.width_um / sim.simulation.voxel_size_um;
-        let world_d_vox = sim.world.depth_um / sim.simulation.voxel_size_um;
-        let side = (num_virtual as f32).sqrt().ceil() as u32;
-        let step_x = (world_w_vox as f32 / side as f32).max(1.0);
-        let step_y = (world_d_vox as f32 / side as f32).max(1.0);
-
-        for i in 0..num_virtual {
-            let ix = i % side;
-            let iy = i / side;
-            let tip_x = ((ix as f32 * step_x) as u32).min(world_w_vox.saturating_sub(1));
-            let tip_y = ((iy as f32 * step_y) as u32).min(world_d_vox.saturating_sub(1));
-            
-            // Encode as type 15 (0xF) so the IDE can color them distinctly if it wants
-            let packed: u32 = (0xF << 28) | (0 << 20) | (tip_y << 10) | tip_x;
-            out.extend_from_slice(&packed.to_le_bytes());
-        }
-    }
-
-    out
-}
