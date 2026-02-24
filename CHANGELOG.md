@@ -8,6 +8,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-02-24
+
+### Added
+- **Ghost Axons (§1.7)** — бесшовный рост аксонов через границы шардов
+- `ShardBounds` structure with `full_world()` and `is_outside()` boundary detection
+- `GhostPacket` inter-shard transfer format (entry point, direction, remaining steps)
+- `inject_ghost_axons()` — ghost axon growth continuation in receiving shard
+- Pipeline integration in `main.rs` with diagnostic logging
+- Unit tests for boundary detection and ghost packet handling
+- Updated spec `04_connectivity.md` §1.7 with full protocol description
+
+## [0.10.1] - 2026-02-24
+
+### Added
+- **Power Score activation** — `compute_power_index` now called during Night Phase sprouting
+- Whitelist filtering in `reconnect_empty_dendrites()` (was missing)
+- `sprouting_weight_type` config parameter for soft type-matching scoring component
+
+## [0.10.0] - 2026-02-24
+
+### Added
+- **Rule of Uniqueness (§1.4)** — `HashSet`-based deduplication prevents redundant axon connections
+- **Dendrite Whitelist (§1.5)** — per-type compatibility filtering via `dendrite_whitelist` in blueprints
+- **Configurable Initial Weight** — `initial_synapse_weight` moved to `blueprints.toml`
+- Unit tests for whitelist and initial weight parsing
+- Updated spec `04_connectivity.md` §1.4–1.5
+
+## [0.9.0] - 2026-02-24
+
+### Added
+- **GPU LUT Expansion 4→16** — each of 16 neuron types gets a unique physical profile (GLIF/GSOP)
+- **Voxel Uniqueness** — reject-sampling guarantees one voxel = at most one neuron
+- `growth_vertical_bias`, `type_affinity`, `is_inhibitory` fields in blueprints
+- Blueprints.toml updated with 4 base types (Vertical_Excitatory, Horizontal_Inhibitory, Stable_Excitatory, Relay_Excitatory)
+
+## [0.8.0] - 2026-02-24
+
+### Added
+- **Binary Formatting (§2.1)** — formalized GSNS/GSAX header specs
+- `InstanceConfig` refactored into dedicated `instance.rs`
+- Default CLI paths updated to `config/zones/V1/*`
+- E2E test script paths corrected
+
+## [0.7.0] - 2026-02-23
+
+### Added
+- **Configuration Architecture (Spec 02 §1.1–1.3)** — `simulation.toml` parser in genesis-core
+- `anatomy.rs` parser with population calculation tests
+- `DerivedPhysics` + `compute_derived_physics()` with §1.6 invariant
+- `Tick`, `Microns`, `Fraction`, `VoxelCoord` type aliases
+- `ms_to_ticks`, `us_to_ticks`, `ticks_to_ms` conversions with unit tests
+- Master Seed §2 implementation
+
+### Fixed
+- `PackedTarget` bitmap layout corrected (16/16 → 22/10)
+- `initial_axon_head(N) + N = AXON_SENTINEL` invariant documented
+
 ## [0.6.0] - 2026-02-23
 
 ### Added
