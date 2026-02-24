@@ -38,9 +38,9 @@ struct Cli {
     #[arg(short = 'b', long, default_value = "baked/")]
     baked_dir: PathBuf,
 
-    /// Path to the blueprints configuration (neuron type LUT)
-    #[arg(long, default_value = "zones/V1/blueprints.toml")]
-    blueprints: PathBuf,
+    /// Path to blueprints config (для загрузки характеристик нейронов)
+    #[arg(long, default_value = "config/zones/V1/blueprints.toml")]
+    pub blueprints: std::path::PathBuf,
 
     /// Actively injects a sweeping signal into Virtual Axons each sync_batch
     #[arg(long)]

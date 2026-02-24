@@ -74,7 +74,7 @@ echo "Running node for 2 seconds (should trigger Night Phase at tick 100)..."
 timeout 2 target/debug/genesis-runtime \
   --config tests/tmp/shard_${ZONE}.toml \
   --simulation tests/tmp/sim.toml \
-  --blueprints zones/V1/blueprints.toml \
+  --blueprints config/zones/V1/blueprints.toml \
   --baked-dir baked/ \
   --baker-socket $SOCK || true
 

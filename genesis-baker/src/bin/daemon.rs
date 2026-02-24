@@ -24,11 +24,9 @@ struct Cli {
     #[arg(short = 'z', long)]
     zone: u16,
 
-    #[arg(short = 's', long, default_value = "config/simulation.toml")]
-    sim: PathBuf,
-
-    #[arg(short = 'b', long, default_value = "zones/V1/blueprints.toml")]
-    blueprints: PathBuf,
+    /// Path to blueprints.toml
+    #[arg(short = 'b', long, default_value = "config/zones/V1/blueprints.toml")]
+    pub blueprints: PathBuf,
 
     /// Directory containing baked shard files (.state, .axons)
     #[arg(long, default_value = "baked/")]

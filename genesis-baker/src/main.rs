@@ -23,11 +23,11 @@ enum Commands {
     Compile {
         #[arg(long, default_value = "config/simulation.toml")]
         simulation: PathBuf,
-        #[arg(long, default_value = "zones/V1/blueprints.toml")]
-        blueprints: PathBuf,
-        #[arg(long, default_value = "zones/V1/anatomy.toml")]
-        anatomy: PathBuf,
-        #[arg(long, default_value = "zones/V1/io.toml")]
+        #[arg(long, default_value = "config/zones/V1/blueprints.toml")]
+        blueprints: std::path::PathBuf,
+        #[arg(long, default_value = "config/zones/V1/anatomy.toml")]
+        anatomy: std::path::PathBuf,
+        #[arg(long, default_value = "config/zones/V1/io.toml")]
         io: PathBuf,
         #[arg(short, long, default_value = "baked/")]
         output: PathBuf,
