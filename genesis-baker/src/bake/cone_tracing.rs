@@ -17,6 +17,7 @@ pub fn calculate_v_attract(
     spatial_grid: &SpatialGrid,
     neurons: &[PlacedNeuron],
     owner_type_mask: u8,
+    owner_soma_idx: usize,
 ) -> Vec3 {
     let mut v_attract = Vec3::ZERO;
     let mut total_weight = 0.0;
@@ -25,6 +26,10 @@ pub fn calculate_v_attract(
     let candidates = spatial_grid.get_in_radius(head_pos, max_search_radius_vox);
 
     for idx in candidates {
+        if idx == owner_soma_idx {
+            continue;
+        }
+
         let target = &neurons[idx];
         
         // Basic type filtering (could be extended via io.toml whitelist/blacklist)
@@ -32,7 +37,7 @@ pub fn calculate_v_attract(
         // In real spec: filter by Variant ID or Type Mask.
         if target.type_idx == (owner_type_mask as usize) {
             // Optional: Skip same type to avoid self-connections
-            // continue;
+            continue;
         }
 
         let target_pos = Vec3::new(target.x() as f32, target.y() as f32, target.z() as f32);

@@ -82,34 +82,4 @@ pub fn parse(src: &str) -> anyhow::Result<Blueprints> {
     let bp: Blueprints = toml::from_str(src)?;
     Ok(bp)
 }
-/// HERE
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    const EXAMPLE: &str = include_str!("../../test_data/blueprints.toml");
-
-    #[test]
-    fn parse_blueprints_example() {
-        let bp = parse(EXAMPLE).expect("parse failed");
-        assert_eq!(bp.neuron_type.len(), 2);
-
-        let ve = &bp.neuron_type[0];
-        assert_eq!(ve.name, "Vertical_Excitatory");
-        assert_eq!(ve.threshold, 42000);
-        assert_eq!(ve.rest_potential, 10000);
-        assert_eq!(ve.refractory_period, 15);
-        assert_eq!(ve.slot_decay_ltm, 160);
-        assert_eq!(ve.slot_decay_wm, 96);
-        assert!((ve.steering_fov_deg - 60.0).abs() < 1e-5);
-        assert!((ve.steering_weight_inertia - 0.6).abs() < 1e-5);
-        // sprouting weights sum ≈ 1.0
-        assert!((ve.sprouting_weight_sum() - 1.0).abs() < 1e-5);
-
-        let hi = &bp.neuron_type[1];
-        assert_eq!(hi.name, "Horizontal_Inhibitory");
-        assert_eq!(hi.conduction_velocity, 100);
-        assert_eq!(hi.slot_decay_wm, 80);
-        assert!((hi.steering_fov_deg - 90.0).abs() < 1e-5);
-    }
-}

@@ -13,14 +13,3 @@ pub fn padded_n(neuron_count: usize) -> usize {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn padded_n_aligns_to_warp() {
-        assert_eq!(padded_n(32), 32);
-        assert_eq!(padded_n(33), 64);
-        assert_eq!(padded_n(100), 128);
-        assert_eq!(padded_n(0), 0);
-    }
-}

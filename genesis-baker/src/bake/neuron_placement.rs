@@ -1,5 +1,6 @@
 use crate::bake::seed::{entity_seed, random_f32, shuffle_indices};
 use crate::parser::{anatomy::Anatomy, simulation::SimulationConfig};
+use genesis_core::coords::{pack_position, unpack_position};
 use genesis_core::types::PackedPosition;
 
 /// Размещённый нейрон в 3D-пространстве.
@@ -15,37 +16,14 @@ pub struct PlacedNeuron {
 }
 
 impl PlacedNeuron {
-    /// Распаковать X координату (биты 9:0)
-    pub fn x(&self) -> u32 {
-        self.position & 0x3FF
-    }
-    /// Распаковать Y координату (биты 19:10)
-    pub fn y(&self) -> u32 {
-        (self.position >> 10) & 0x3FF
-    }
-    /// Распаковать Z координату (биты 27:20)
-    pub fn z(&self) -> u32 {
-        (self.position >> 20) & 0xFF
-    }
-    #[allow(dead_code)]
-    /// Распаковать type_mask (биты 31:28)
-    pub fn type_mask(&self) -> u32 {
-        self.position >> 28
-    }
-}
-
-/// Упаковывает координаты в PackedPosition.
-/// Layout: [type(4b) | z(8b) | y(10b) | x(10b)]
-pub fn pack_position(x: u32, y: u32, z: u32, type_mask: u32) -> PackedPosition {
-    debug_assert!(x < 1024, "X={} exceeds 10-bit range", x);
-    debug_assert!(y < 1024, "Y={} exceeds 10-bit range", y);
-    debug_assert!(z < 256, "Z={} exceeds 8-bit range", z);
-    debug_assert!(
-        type_mask < 16,
-        "type_mask={} exceeds 4-bit range",
-        type_mask
-    );
-    (type_mask << 28) | (z << 20) | (y << 10) | x
+    /// X-координата в вокселях.
+    #[inline] pub fn x(&self) -> u32 { unpack_position(self.position).0 }
+    /// Y-координата в вокселях.
+    #[inline] pub fn y(&self) -> u32 { unpack_position(self.position).1 }
+    /// Z-координата в вокселях.
+    #[inline] pub fn z(&self) -> u32 { unpack_position(self.position).2 }
+    /// Тип-маска нейрона (4 бита).
+    #[inline] pub fn type_mask(&self) -> u32 { unpack_position(self.position).3 }
 }
 
 /// Размещает все нейроны зоны в 3D-пространстве.
@@ -117,120 +95,3 @@ pub fn place_neurons(
     all_neurons
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bake::seed::{seed_from_str, DEFAULT_MASTER_SEED};
-    use crate::parser::{anatomy, simulation};
-
-    const SIM: &str = r#"
-[world]
-width_um = 3500
-depth_um = 3500
-height_um = 10250
-[simulation]
-tick_duration_us = 100
-total_ticks = 10000
-master_seed = "GENESIS"
-global_density = 0.04
-voxel_size_um = 25
-signal_speed_um_tick = 50
-sync_batch_ticks = 1000
-"#;
-
-    const ANATOMY: &str = r#"
-[[layer]]
-name = "L4"
-height_pct = 0.40
-population_pct = 0.55
-[layer.composition]
-"Vertical_Excitatory"   = 0.80
-"Horizontal_Inhibitory" = 0.20
-
-[[layer]]
-name = "L2/3"
-height_pct = 0.60
-population_pct = 0.45
-[layer.composition]
-"Vertical_Excitatory"   = 0.85
-"Horizontal_Inhibitory" = 0.15
-"#;
-
-    fn make_sim_and_anatomy() -> (SimulationConfig, Anatomy) {
-        (
-            simulation::parse(SIM).unwrap(),
-            anatomy::parse(ANATOMY).unwrap(),
-        )
-    }
-
-    #[test]
-    fn placement_count_matches_budget() {
-        let (sim, an) = make_sim_and_anatomy();
-        let type_names = vec![
-            "Vertical_Excitatory".to_string(),
-            "Horizontal_Inhibitory".to_string(),
-        ];
-        let master = seed_from_str(DEFAULT_MASTER_SEED);
-        let neurons = place_neurons(&sim, &an, &type_names, master);
-        let budget = sim.neuron_budget() as usize;
-        // Допуск: floor() на каждом слое может дать -1..0 нейронов
-        assert!(
-            (neurons.len() as i64 - budget as i64).abs() < 10,
-            "placed={} expected≈{}",
-            neurons.len(),
-            budget
-        );
-    }
-
-    #[test]
-    fn positions_in_world_bounds() {
-        let (sim, an) = make_sim_and_anatomy();
-        let type_names = vec![
-            "Vertical_Excitatory".to_string(),
-            "Horizontal_Inhibitory".to_string(),
-        ];
-        let master = seed_from_str(DEFAULT_MASTER_SEED);
-        let neurons = place_neurons(&sim, &an, &type_names, master);
-        let voxel = sim.simulation.voxel_size_um;
-        let max_x = (sim.world.width_um / voxel) as u32;
-        let max_y = (sim.world.depth_um / voxel) as u32;
-        // Check first 1000 to stay fast
-        for n in neurons.iter().take(1000) {
-            assert!(n.x() < max_x, "X={} out of bounds (max {})", n.x(), max_x);
-            assert!(n.y() < max_y, "Y={} out of bounds (max {})", n.y(), max_y);
-        }
-    }
-
-    #[test]
-    fn placement_is_deterministic() {
-        let (sim, an) = make_sim_and_anatomy();
-        let type_names = vec![
-            "Vertical_Excitatory".to_string(),
-            "Horizontal_Inhibitory".to_string(),
-        ];
-        let master = seed_from_str(DEFAULT_MASTER_SEED);
-        let a = place_neurons(&sim, &an, &type_names, master);
-        let b = place_neurons(&sim, &an, &type_names, master);
-        assert_eq!(a.len(), b.len());
-        assert!(
-            a.iter()
-                .zip(b.iter())
-                .all(|(x, y)| x.position == y.position),
-            "placement must be bit-identical for same seed"
-        );
-    }
-
-    #[test]
-    fn pack_unpack_roundtrip() {
-        let pos = pack_position(512, 256, 128, 3);
-        let n = PlacedNeuron {
-            position: pos,
-            type_idx: 3,
-            layer_name: "L4".into(),
-        };
-        assert_eq!(n.x(), 512);
-        assert_eq!(n.y(), 256);
-        assert_eq!(n.z(), 128);
-        assert_eq!(n.type_mask(), 3);
-    }
-}

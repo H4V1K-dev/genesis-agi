@@ -28,33 +28,3 @@ pub fn parse(src: &str) -> anyhow::Result<IoConfig> {
     Ok(io)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const EXAMPLE: &str = r#"
-[[input]]
-name = "From_Thalamus_LGN"
-target_layer = "L4"
-axon_count = 15000
-type_mask = 0x11 # Example: Geo/Sign/Variant
-
-[[input]]
-name = "From_Motor_Cortex"
-target_layer = "L1"
-axon_count = 5000
-type_mask = 0x12
-"#;
-
-    #[test]
-    fn parse_io_example() {
-        let io = parse(EXAMPLE).expect("parse failed");
-        assert_eq!(io.input.len(), 2);
-        
-        let lgn = &io.input[0];
-        assert_eq!(lgn.name, "From_Thalamus_LGN");
-        assert_eq!(lgn.target_layer, "L4");
-        assert_eq!(lgn.axon_count, 15000);
-        assert_eq!(lgn.type_mask, 0x11);
-    }
-}

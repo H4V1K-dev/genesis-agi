@@ -17,3 +17,4 @@ repository = "https://github.com/OxAlex-AGI/genesis"
 [workspace.dependencies]
 # genesis-core is a local dep for the others
 genesis-core = { path = "genesis-core" }
+wyhash = "0.5"

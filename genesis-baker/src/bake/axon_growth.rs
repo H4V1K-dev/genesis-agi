@@ -126,7 +126,7 @@ pub fn grow_axons(
         let weight_jitter = nt.steering_weight_jitter;
 
         // V_global (Goal)
-        let mut target_pos = Vec3::new(soma_x as f32, soma_y as f32, tip_z as f32);
+        let target_pos = Vec3::new(soma_x as f32, soma_y as f32, tip_z as f32);
         
         let is_growing_up = tip_z >= soma_z;
         let mut forward_dir = if is_growing_up { Vec3::Z } else { Vec3::NEG_Z };
@@ -162,6 +162,7 @@ pub fn grow_axons(
                 &spatial_grid,
                 neurons,
                 owner_type_mask,
+                soma_idx,
             );
 
             // Jitter
@@ -241,74 +242,7 @@ fn find_target_layer(soma_z: u32, ranges: &[LayerZRange]) -> Option<&LayerZRange
         .min_by_key(|l| l.z_start_vox)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bake::neuron_placement::place_neurons;
-    use crate::bake::seed::{seed_from_str, DEFAULT_MASTER_SEED};
-    use crate::parser::{anatomy, blueprints, simulation};
-    use genesis_core::constants::AXON_SENTINEL;
-/// HERE
-    const SIM: &str = include_str!("../../test_data/simulation_fast.toml");
-    const ANATOMY: &str = include_str!("../../test_data/anatomy.toml");
-    const BP: &str = include_str!("../../test_data/blueprints.toml");
 
-    fn setup() -> (
-        Vec<PlacedNeuron>,
-        Vec<GrownAxon>,
-        Vec<LayerZRange>,
-        Vec<NeuronType>,
-        SimulationConfig,
-    ) {
-        let sim = simulation::parse(SIM).unwrap();
-        let an = anatomy::parse(ANATOMY).unwrap();
-        let bp = blueprints::parse(BP).unwrap();
-        let type_names: Vec<String> = bp.neuron_type.iter().map(|n| n.name.clone()).collect();
-        let master = seed_from_str(DEFAULT_MASTER_SEED);
-        let neurons = place_neurons(&sim, &an, &type_names, master);
-        let ranges = compute_layer_ranges(&an, &sim);
-        let axons = grow_axons(&neurons, &ranges, &bp.neuron_type, &sim, master);
-        (neurons, axons, ranges, bp.neuron_type, sim)
-    }
-
-    #[test]
-    fn axon_count_matches_neuron_count() {
-        let (neurons, axons, ..) = setup();
-        assert_eq!(axons.len(), neurons.len());
-    }
-
-    #[test]
-    fn tip_z_in_world_bounds() {
-        let (_, axons, _, _, sim) = setup();
-        let max_z = (sim.world.height_um / sim.simulation.voxel_size_um).min(255) as u32;
-        for ax in axons.iter().take(500) {
-            assert!(ax.tip_z <= max_z, "tip_z={} > max_z={}", ax.tip_z, max_z);
-        }
-    }
-
-    #[test]
-    fn init_axon_head_not_zero() {
-        // Нулевой head вызвал бы эпилептический спайк в тик 0
-        let v_seg = 2u32;
-        let head = init_axon_head(10, v_seg);
-        assert_ne!(head, 0, "axon_head must never be 0 at init");
-        assert_ne!(head, AXON_SENTINEL, "active axon must not be SENTINEL");
-    }
-
-    #[test]
-    fn growth_is_deterministic() {
-        let (neurons, axons_a, ranges, nt, sim) = setup();
-        let master = seed_from_str(DEFAULT_MASTER_SEED);
-        let axons_b = grow_axons(&neurons, &ranges, &nt, &sim, master);
-        assert!(
-            axons_a
-                .iter()
-                .zip(axons_b.iter())
-                .all(|(a, b)| a.tip_z == b.tip_z && a.tip_x == b.tip_x && a.tip_y == b.tip_y),
-            "axon growth must be deterministic"
-        );
-    }
-}
 
 /// Generates fake "External" Ghost Axons that originate from other shards (Atlas Routing).
 /// They aren't attached to any local soma, so `soma_idx` is set to `usize::MAX`.

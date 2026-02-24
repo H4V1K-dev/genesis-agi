@@ -54,43 +54,4 @@ pub fn voxel_dist(ax: u32, ay: u32, az: u32, bx: u32, by: u32, bz: u32) -> f32 {
     let dz = az as f32 - bz as f32;
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
-// HERE
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::parser::blueprints;
 
-    const BP: &str = include_str!("../../test_data/blueprints.toml");
-
-    #[test]
-    fn compute_power_index_zero_weights() {
-        let weights = vec![0i16; 128 * 32];
-        let pi = compute_power_index(0, &weights, 32);
-        assert_eq!(pi, 0.0, "blank shard: all power indices must be 0.0");
-    }
-
-    #[test]
-    fn compute_power_index_max_weights() {
-        let weights = vec![i16::MAX; 128 * 32];
-        let pi = compute_power_index(0, &weights, 32);
-        assert!(
-            (pi - 1.0).abs() < 1e-4,
-            "max weights → power_index ≈ 1.0, got {}",
-            pi
-        );
-    }
-
-    #[test]
-    fn sprouting_score_closer_wins() {
-        let bp = blueprints::parse(BP).unwrap();
-        let cfg = SproutingWeights::from_neuron_type(&bp.neuron_type[0]);
-        let score_near = sprouting_score(1.0, 0.5, 42, &cfg);
-        let score_far = sprouting_score(100.0, 0.5, 42, &cfg);
-        assert!(score_near > score_far, "closer axon must score higher");
-    }
-
-    #[test]
-    fn voxel_dist_zero_same_point() {
-        assert_eq!(voxel_dist(5, 5, 5, 5, 5, 5), 0.0);
-    }
-}

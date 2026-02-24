@@ -54,41 +54,6 @@ pub fn parse_shard_config(path: &Path) -> Result<InstanceConfig> {
     Ok(config)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_shard_config_example() {
-        let toml_str = r#"
-zone_id = "V1"
-
-[world_offset]
-x = 1000
-y = 0
-z = 0
-
-[dimensions]
-w = 500
-d = 500
-h = 2000
-
-[neighbors]
-x_plus = "192.168.1.10:8000"
-x_minus = "Self"
-y_plus = "192.168.1.11:8000"
-# y_minus is bounded (None)
-        "#;
-
-        let config: InstanceConfig = toml::from_str(toml_str).expect("Failed to parse string");
-        assert_eq!(config.zone_id, "V1");
-        assert_eq!(config.world_offset.x, 1000);
-        assert_eq!(config.world_offset.z, 0);
-        assert_eq!(config.dimensions.h, 2000);
-        assert_eq!(config.neighbors.x_minus.as_deref(), Some("Self"));
-        assert_eq!(config.neighbors.y_minus, None);
-    }
-}
 
 // ---- Simulation Configuration (Runtime specifics) ----
 

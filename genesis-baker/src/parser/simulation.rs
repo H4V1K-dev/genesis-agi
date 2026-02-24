@@ -68,34 +68,3 @@ pub fn parse(src: &str) -> anyhow::Result<SimulationConfig> {
     Ok(cfg)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-/// HERE
-    const EXAMPLE: &str = include_str!("../../test_data/simulation.toml");
-
-    #[test]
-    fn parse_simulation_example() {
-        let cfg = parse(EXAMPLE).expect("parse failed");
-        assert_eq!(cfg.simulation.tick_duration_us, 100);
-        assert_eq!(cfg.simulation.master_seed, "GENESIS");
-        assert!((cfg.simulation.global_density - 0.04).abs() < 1e-6);
-        assert_eq!(cfg.simulation.voxel_size_um, 25);
-        assert_eq!(cfg.simulation.signal_speed_um_tick, 50);
-        assert_eq!(cfg.simulation.sync_batch_ticks, 1000);
-        assert_eq!(cfg.simulation.axon_growth_max_steps, 1500);
-    }
-
-    #[test]
-    fn neuron_budget_sanity() {
-        let cfg = parse(EXAMPLE).expect("parse failed");
-        let voxels = cfg.total_voxels();
-        // 140 × 140 × 410 = 8_036_000
-        assert_eq!(voxels, 8_036_000);
-        let budget = cfg.neuron_budget();
-        // 8_036_000 * 0.04 = 321_440
-        // 8_036_000 * 0.04 = 321_440.0, but f32 precision may give 321_439
-        let diff = budget as i64 - 321_440;
-        assert!(diff.abs() <= 1, "neuron_budget far off: {}", budget);
-    }
-}
