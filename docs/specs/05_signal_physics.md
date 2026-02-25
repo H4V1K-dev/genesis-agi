@@ -155,7 +155,7 @@ __global__ void UpdateNeurons(
 
     // 1. Распаковка типа + загрузка параметров (1 такт L1)
     u8 f = flags[tid];
-    u8 var_id = (f >> 6) & 0x3;              // Биты 6-7 = Variant
+    u8 var_id = (f >> 4) & 0xF;              // Биты 4-7 = Variant (16 типов)
     VariantParameters p = CONST_MEM.variants[var_id];
 
     // 2. Гомеостаз (Soft Limit) — выполняется ВСЕГДА, даже когда сома спит
@@ -252,7 +252,10 @@ __global__ void PropagateAxons(u32* axon_heads, u32 total_axons, u32 v_seg) {
     if (tid >= total_axons) return;
 
     // 100% Coalesced Access. 1 такт IADD. 0 ветвлений.
-    axon_heads[tid] += v_seg;
+    u32 head = axon_heads[tid];
+    if (head != AXON_SENTINEL) {
+        axon_heads[tid] = head + v_seg;
+    }
 }
 ```
 

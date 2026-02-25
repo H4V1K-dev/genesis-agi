@@ -12,3 +12,6 @@ pub mod types;
 #[cfg(test)]
 #[path = "test_gsop_math.rs"]
 mod test_gsop_math;
+
+#[cfg(test)]
+mod test_tick;

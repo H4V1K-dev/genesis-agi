@@ -136,7 +136,7 @@ __global__ void update_neurons_kernel(uint32_t padded_n, int32_t *voltage,
     uint32_t head = axon_heads[axon_id];
     uint32_t dist = head - seg_idx;
 
-    if (dist <= p.propagation_length) {
+    if (dist < p.propagation_length) {
       // 5d. Voltage accumulation (i16→i32, sign baked in)
       v += (int32_t)dendrite_weights[col_idx];
 

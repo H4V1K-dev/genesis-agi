@@ -232,12 +232,14 @@ async fn main() -> Result<()> {
         current_tick += 1;
         let real_ticks_completed = current_tick * sync_batch_ticks as u64;
 
-        // 6.3 Night Phase Check (trigger from config, not hardcoded)
+        // 6.3 Night Phase & Sentinel Refresh
         for zone in zones.iter_mut() {
             let is_night = NightPhase::check_and_run(&mut zone.runtime, 0, night_interval, real_ticks_completed, zone.prune_threshold);
             if is_night {
                 println!("[Node] Night Phase for Zone '{}' concluded.", zone.name);
             }
+            // 6.4 Проверка на сброс переполненных аксонов (раз в 50h)
+            zone.runtime.sentinel.check_and_refresh(&zone.runtime, real_ticks_completed);
         }
 
         // Throttle to simulated real time (e.g. 10ms network barrier limits display speed)

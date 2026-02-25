@@ -8,6 +8,7 @@ pub mod network;
 pub mod mock_ffi;
 pub mod orchestrator;
 pub mod zone_runtime;
+pub mod sentinel;
 
 use memory::VramState;
 use std::ptr;
@@ -81,6 +82,7 @@ pub struct Runtime {
     /// IPC client for baker daemon (None if baker not configured)
     pub baker_client: Option<crate::ipc::BakerClient>,
     pub geometry_receiver: Option<mpsc::Receiver<(GeometryRequest, oneshot::Sender<GeometryResponse>)>>,
+    pub sentinel: crate::sentinel::SentinelManager,
 }
 
 impl Runtime {
@@ -90,7 +92,15 @@ impl Runtime {
         master_seed: u64,
         shard_data_path: Option<std::path::PathBuf>,
     ) -> Self {
-        Self { vram, v_seg, master_seed, shard_data_path, baker_client: None, geometry_receiver: None }
+        Self { 
+            vram, 
+            v_seg, 
+            master_seed, 
+            shard_data_path, 
+            baker_client: None, 
+            geometry_receiver: None,
+            sentinel: crate::sentinel::SentinelManager::new() 
+        }
     }
 
     pub fn init_constants(constants: &GenesisConstantMemory) -> bool {
