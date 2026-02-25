@@ -10,3 +10,4 @@ pub mod cone_tracing;
 #[cfg(test)] mod test_spatial_grid;
 #[cfg(test)] mod test_cone_tracing;
 #[cfg(test)] mod test_axon_growth;
+#[cfg(test)] mod test_dendrite_connect;
