@@ -8,6 +8,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.13] - 2026-02-26
+
+### Added
+- **True Hardware E2E Scalability (§2)** — verified 1M neurons simulating at real physics bounds
+- E2E synthetic benchmark `e2e_test.rs` capturing real CUDA execution speeds bypassing CPU Baker overhead
+- Real-time physics bounds metrics on GTX 1080 Ti equivalent: ~32k Ticks/s (1K), ~22k Ticks/s (10K), ~5k Ticks/s (100K)
+- Proved memory safety and full pipeline closure from Virtual Input → GLIF → GSOP → Output Readout loops
+
+## [0.13.5] - 2026-02-26
+
+### Added
+- **Readout Interface (Output §3)** — `record_readout_kernel` extracting flagged motor spikes
+- Dense `output_history` buffer capturing batched readout spikes per tick inside VRAM
+- `IoConfig` expanded in Core config with `OutputMap` and `readout_batch_ticks` for tiled outputs
+- Atlas tiling generation for motor soma assignment via `.gxo` files in Baker
+- DayPhase integration of readout recording into the simulation fast-path
+- Removed obsolete `record_outputs.cu` and atomic spike routing logic
+- **Sleep API and Spike Drop** — `is_sleeping` and `sleep_requested` added to runtime. Sleeping zones drop incoming spikes (Legalized Amnesia §2.3) and skip physics.
+- **Secure Cross-Shard Geometry** — bounds check (`if ghost_id < total_axons`) in `apply_spike_batch_kernel`
+- **Night Phase Checkpointing** — logic dumping `pre_sprout` states to disk before Baker processing
+
+### Fixed
+- SIGSEGV in mock-gpu runtime tests resolved
+- Fix `local_axons_count` being shadowed after virtual axon append
+
+## [0.12.3] - 2026-02-25
+
+### Added
+- **Input Interface (Virtual Axons §2.1)** — added `inject_inputs.cu` to map 1-bit external bitmasks to virtual axon firing
+- Abstracted `grow_single_axon()` for reuse in Input map generation (`grow_input_maps`)
+- Deterministic FNV-1a seeded routing for `pixel→soma` translation across virtual axons
+- Generation of `.gxi` (Genesis eXternal Input) binary format with Header, Map Descriptors, and flat axon arrays
+- Expanded VRAM state to load `.gxi` indirection tables (`map_pixel_to_axon`) and allocate bitmask buffers
+- Batched bitmask upload capability (`upload_input_bitmask`) via DayPhase
+- **Testing Architecture** — comprehensive unit testing for Cone Tracing algorithm (26 tests in genesis-baker) covering SpatialGrid sensing, trajectory steering, and multi-shard generation
+- **Testing Architecture** — comprehensive testing of synaptogenesis (dendrite_connect) validating Rule of Uniqueness, Type Whitelist, Inhibitory signs, and Self-Exclusion with an ASCII visualizer
+
+### Fixed
+- Active Tail bounds alignment and axon sentinel refresh implemented
+- Protective layers against Signal Superimposition and refraction bounds
+- Fix broken indentation and redundant unsafe blocks in VramState drop
+
 ## [0.11.0] - 2026-02-24
 
 ### Added

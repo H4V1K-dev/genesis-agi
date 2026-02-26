@@ -18,7 +18,12 @@
 - [x] Configuration Architecture — parsers, type system, derived physics
 - [x] Connectivity Audit §1 — growth differentiation, whitelist, ghost axons
 - [ ] Connectivity Audit §2 — plasticity, GSOP, inertia curves
-- [ ] First learning experiment
+- [ ] Phase 3: External Network I/O (UDP/TCP Inter-shard Sync)
+- [ ] Minimal Working Connectome (C. elegans / Drosophila complexity / other)
+- [ ] Genesis IDE v0.2 — Minimal monitoring (Live spike heatmaps, network visualizer)
+- [ ] Embodiment Integration — Unreal Engine / Blender Plugin (Sensory/Motor API translation)
+- [ ] Test Embodiment Scene — Virtual environment with basic navigation/avoidance tasks
+- [ ] First Learning Experiment (In-engine validation of GSOP)
 - [ ] V 1.0.0 Release
 
 ---
