@@ -50,11 +50,12 @@ extern "C" {
         axon_heads: *mut c_void,
         stream: *mut c_void,
     );
-    pub fn launch_record_outputs(
-        padded_n: u32,
-        flags: *mut c_void,
-        outbound_spikes_buffer: *mut c_void,
-        outbound_spikes_count: *mut c_void,
+    pub fn launch_record_readout(
+        flags: *const c_void,
+        mapped_soma_ids: *const c_void,
+        output_history: *mut c_void,
+        total_mapped_somas: u32,
+        current_tick_in_batch: u32,
         stream: *mut c_void,
     );
     pub fn launch_sort_and_prune(

@@ -62,46 +62,17 @@ impl DayPhase {
                 // 2. Propagate Axons, Update Neurons, Apply GSOP
                 zone.runtime.tick();
 
-                // 3. Record Outgoing Spikes
-                unsafe {
-                    let zero: u32 = 0;
-                    ffi::gpu_memcpy_host_to_device(
-                        zone.runtime.vram.outbound_spikes_count,
-                        &zero as *const _ as *const c_void,
-                        4
-                    );
-
-                    ffi::launch_record_outputs(
-                        zone.runtime.vram.padded_n as u32,
-                        zone.runtime.vram.flags,
-                        zone.runtime.vram.outbound_spikes_buffer,
-                        zone.runtime.vram.outbound_spikes_count,
-                        std::ptr::null_mut(),
-                    );
-                    
-                    let mut host_count: u32 = 0;
-                    ffi::gpu_memcpy_device_to_host(
-                        &mut host_count as *mut _ as *mut c_void,
-                        zone.runtime.vram.outbound_spikes_count,
-                        4
-                    );
-
-                    if host_count > 0 {
-                        let mut host_spikes = vec![0u32; host_count as usize];
-                        ffi::gpu_memcpy_device_to_host(
-                            host_spikes.as_mut_ptr() as *mut c_void,
-                            zone.runtime.vram.outbound_spikes_buffer,
-                            (host_count as usize) * 4
+                // 3. Record Readout Interface (Batching raw spikes)
+                if zone.runtime.vram.num_mapped_somas > 0 {
+                    unsafe {
+                        ffi::launch_record_readout(
+                            zone.runtime.vram.flags,
+                            zone.runtime.vram.mapped_soma_ids,
+                            zone.runtime.vram.output_history,
+                            zone.runtime.vram.num_mapped_somas,
+                            current_tick as u32,
+                            std::ptr::null_mut(),
                         );
-
-                        router.route_spikes(&host_spikes, current_tick as u32);
-                        
-                        if let Some(tx) = telemetry_tx {
-                            let _ = tx.send(crate::network::telemetry::TelemetryPayload {
-                                tick: (batch_id as u64) * (batch_ticks as u64) + (current_tick as u64),
-                                active_spikes: host_spikes,
-                            });
-                        }
                     }
                 }
             }
@@ -113,6 +84,15 @@ impl DayPhase {
         // Wait for all GPU streams to finish before network barrier
         for zone in zones.iter() {
             zone.runtime.synchronize();
+            
+            // Extract the completed output_history batch from GPU
+            if zone.runtime.vram.num_mapped_somas > 0 {
+                if let Ok(history) = zone.runtime.vram.download_output_history() {
+                    // TODO: Emit this byte array to the network / hub.
+                    // For now, we just have the data in memory.
+                    // println!("[Node] Zone {} flushed {} bytes of readout history", zone.name, history.len());
+                }
+            }
         }
 
         // Flush outbound router queues and run the BSP Barrier Sync

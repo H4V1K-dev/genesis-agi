@@ -1,11 +1,21 @@
 use serde::Deserialize;
 
 /// Represents external projection connections coming into this shard (White Matter/Atlas).
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct IoConfig {
+    #[serde(default)]
     #[serde(rename = "input")]
     pub inputs: Vec<InputMap>,
+
+    #[serde(default)]
+    #[serde(rename = "output")]
+    pub outputs: Vec<OutputMap>,
+
+    /// Количество тиков в одном батче вывода (по умолчанию равно размеру sync_batch_ticks)
+    #[serde(default)]
+    pub readout_batch_ticks: Option<u32>,
 }
+
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct InputMap {
@@ -23,6 +33,25 @@ pub struct InputMap {
     pub width: u32,
     
     /// Высота входной матрицы в пикселях
+    pub height: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OutputMap {
+    /// Имя популяции/канала вывода, например "motor_arm"
+    pub name: String,
+    
+    /// Название зоны из которой читаем спайки, например "M1"
+    pub source_zone: String,
+    
+    /// Фрагмент маски (тип нейронов), которые входят в популяцию тайла.
+    /// Используйте "ALL" для сбора всех типов.
+    pub target_type: String,
+    
+    /// Ширина выходной матрицы в тайлах
+    pub width: u32,
+    
+    /// Высота выходной матрицы в тайлах
     pub height: u32,
 }
 

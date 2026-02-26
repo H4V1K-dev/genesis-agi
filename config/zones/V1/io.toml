@@ -9,3 +9,10 @@ name = "From_Motor_Cortex"
 target_layer = "L1"
 axon_count = 500
 type_mask = 0x22
+
+[[output]]
+name = "motor_arm"
+source_zone = "V1"
+target_type = "ALL"
+width = 8
+height = 8

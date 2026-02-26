@@ -34,8 +34,10 @@ mod tests {
             num_pixels: 0,
             map_pixel_to_axon: std::ptr::null_mut(),
             input_bitmask_buffer: std::ptr::null_mut(),
-            outbound_spikes_buffer: std::ptr::null_mut(),
-            outbound_spikes_count: std::ptr::null_mut(),
+            num_mapped_somas: 0,
+            readout_batch_ticks: 0,
+            mapped_soma_ids: std::ptr::null_mut(),
+            output_history: std::ptr::null_mut(),
             soma_to_axon: std::ptr::null_mut(),
 
             // Axon specific

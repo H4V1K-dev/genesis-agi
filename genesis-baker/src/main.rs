@@ -163,6 +163,28 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
                 num_virtual
             );
         }
+
+        // --- 5.3 External Outputs (Readout Maps) ---
+        println!("[baker] Processing Output Maps for zone '{}'...", zone_name_heuristic);
+        
+        let output_result = bake::output_map::bake_output_maps(
+            io_cfg,
+            zone_name_heuristic,
+            &neurons,
+            &blueprints,
+            &sim,
+        );
+
+        if !output_result.gxo_binary.is_empty() {
+            let gxo_path = out_dir.join(format!("{}.gxo", shard_name));
+            atomic_write(&gxo_path, &output_result.gxo_binary)?;
+            println!(
+                "[baker] ✓ Written: {}.gxo ({:.1} KB) with {} mapped somas",
+                shard_name,
+                output_result.gxo_binary.len() as f64 / 1024.0,
+                output_result.num_mapped_somas
+            );
+        }
     }
     if !ghost_packets.is_empty() {
         println!("[baker] ✓ {} ghost packet(s) detected — injecting into shard B...", ghost_packets.len());

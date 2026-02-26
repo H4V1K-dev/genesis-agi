@@ -126,19 +126,26 @@ async fn main() -> Result<()> {
         let axons_bytes = std::fs::read(&axons_path).context(format!("Missing {:?}", axons_path))?;
 
         let mut gxi = None;
+        let mut gxo = None;
         if let Ok(entries) = std::fs::read_dir(&zone_entry.baked_dir) {
             for entry in entries.flatten() {
-                if entry.path().extension().and_then(|e| e.to_str()) == Some("gxi") {
-                    println!("       Loading GXI Map: {:?}", entry.path().file_name().unwrap());
-                    if let Ok(parsed) = genesis_runtime::input::GxiFile::load(entry.path()) {
-                        gxi = Some(parsed);
-                        break;
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    if ext == "gxi" {
+                        println!("       Loading GXI Map: {:?}", entry.path().file_name().unwrap());
+                        if let Ok(parsed) = genesis_runtime::input::GxiFile::load(entry.path()) {
+                            gxi = Some(parsed);
+                        }
+                    } else if ext == "gxo" {
+                        println!("       Loading GXO Output Map: {:?}", entry.path().file_name().unwrap());
+                        if let Ok(parsed) = genesis_runtime::output::GxoFile::load(entry.path()) {
+                            gxo = Some(parsed);
+                        }
                     }
                 }
             }
         }
 
-        let vram = VramState::load_shard(&state_bytes, &axons_bytes, gxi.as_ref())
+        let vram = VramState::load_shard(&state_bytes, &axons_bytes, gxi.as_ref(), gxo.as_ref())
             .context("Failed to push shard data to GPU VRAM")?;
 
         println!("       VRAM Load Complete. {} neurons, {} total axons", vram.padded_n, vram.total_axons);

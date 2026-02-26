@@ -4,6 +4,7 @@ pub mod ipc;
 pub mod memory;
 pub mod network;
 pub mod input;
+pub mod output;
 
 #[cfg(feature = "mock-gpu")]
 pub mod mock_ffi;

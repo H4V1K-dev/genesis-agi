@@ -9,3 +9,10 @@
 # target_layer = "Default"
 # axon_count = 1000
 # type_mask = 0x01
+
+# [[output]]
+# name = "motor_arm"
+# source_zone = "TemplateZone"
+# target_type = "ALL"
+# width = 8
+# height = 8

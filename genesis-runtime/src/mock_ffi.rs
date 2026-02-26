@@ -58,6 +58,6 @@ pub extern "C" fn upload_constant_memory(_host_ptr: *const c_void) -> bool {
 #[no_mangle] pub extern "C" fn launch_update_neurons(_1: u32, _2: *mut c_void, _3: *mut c_void, _4: *mut c_void, _5: *mut c_void, _6: *mut c_void, _7: *mut c_void, _8: *mut c_void, _9: *mut c_void, _10: *mut c_void, _11: *mut c_void) {}
 #[no_mangle] pub extern "C" fn launch_apply_gsop(_1: u32, _2: *mut c_void, _3: *mut c_void, _4: *mut c_void, _5: *mut c_void, _6: *mut c_void) {}
 #[no_mangle] pub extern "C" fn launch_apply_spike_batch_impl(_1: u32, _2: *mut c_void, _3: *mut c_void, _4: *mut c_void) {}
-#[no_mangle] pub extern "C" fn launch_record_outputs(_1: u32, _2: *mut c_void, _3: *mut c_void, _4: *mut c_void, _5: *mut c_void) {}
+#[no_mangle] pub extern "C" fn launch_record_readout(_1: *const c_void, _2: *const c_void, _3: *mut c_void, _4: u32, _5: u32, _6: *mut c_void) {}
 #[no_mangle] pub extern "C" fn launch_sort_and_prune(_1: u32, _2: u32, _3: i16, _4: *mut c_void, _5: *mut c_void, _6: *mut c_void, _7: *mut c_void, _8: *mut c_void) {}
 #[no_mangle] pub extern "C" fn launch_inject_inputs(_1: *mut c_void, _2: *const c_void, _3: *const c_void, _4: u32, _5: u32, _6: *mut c_void) {}

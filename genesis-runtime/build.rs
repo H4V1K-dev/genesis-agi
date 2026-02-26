@@ -21,7 +21,7 @@ fn main() {
         .file("cuda/bindings.cu")
         .file("cuda/physics.cu")
         .file("cuda/apply_spike_batch.cu")
-        .file("cuda/record_outputs.cu")
+        .file("cuda/readout.cu")
         .file("cuda/sort_and_prune.cu")
         .file("cuda/inject_inputs.cu")
         .compile("genesis_cuda");

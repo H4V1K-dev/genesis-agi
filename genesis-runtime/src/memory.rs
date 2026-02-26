@@ -32,15 +32,19 @@ pub struct VramState {
     pub map_pixel_to_axon: *mut c_void,
     pub input_bitmask_buffer: *mut c_void,
 
-    // Outbound Spikes (Per-Tick, MAX_SPIKES_PER_TICK length)
-    pub outbound_spikes_buffer: *mut c_void,
-    pub outbound_spikes_count: *mut c_void,
+    // Outbound Spikes (Per-Tick, MAX_SPIKES_PER_TICK length) - REMOVED
+
+    // Readout Interface (Output §3)
+    pub num_mapped_somas: u32,
+    pub readout_batch_ticks: u32,
+    pub mapped_soma_ids: *mut c_void,   // [total_mapped_somas] u32
+    pub output_history: *mut c_void,     // [batch_ticks × total_mapped_somas] u8
 }
 
 impl VramState {
     /// Loads the raw binary `.state` and `.axons` blobs from baker and 
     /// zero-copy migrates them into GPU VRAM (SoA layout).
-    pub fn load_shard(state_bytes: &[u8], axons_bytes: &[u8], gxi: Option<&crate::input::GxiFile>) -> anyhow::Result<Self> {
+    pub fn load_shard(state_bytes: &[u8], axons_bytes: &[u8], gxi: Option<&crate::input::GxiFile>, gxo: Option<&crate::output::GxoFile>) -> anyhow::Result<Self> {
         let axons_header = AxonsFileHeader::from_bytes(axons_bytes)
             .map_err(|e| anyhow::anyhow!(e))?;
         let num_axons = axons_header.total_axons as usize;
@@ -141,13 +145,37 @@ impl VramState {
             );
         }
 
-        // Output buffer for spikes. Max 1024 spikes per tick.
-        let outbound_spikes_buffer = unsafe { ffi::gpu_malloc(1024 * 4) };
-        let outbound_spikes_count = unsafe { ffi::gpu_malloc(4) };
+        // Readout Buffer Allocation
+        let mut mapped_soma_ids = std::ptr::null_mut();
+        let mut output_history = std::ptr::null_mut();
+        let mut num_mapped_somas = 0;
+        let mut readout_batch_ticks = 0;
 
-        // Initialize count to 0
-        let zero: u32 = 0;
-        unsafe { ffi::gpu_memcpy_host_to_device(outbound_spikes_count, &zero as *const _ as *const c_void, 4) };
+        if let Some(o) = gxo {
+            num_mapped_somas = o.total_somas;
+            readout_batch_ticks = o.readout_batch_ticks;
+            if num_mapped_somas > 0 && readout_batch_ticks > 0 {
+                unsafe {
+                    let somas_bytes = (num_mapped_somas as usize) * 4;
+                    mapped_soma_ids = ffi::gpu_malloc(somas_bytes);
+                    if mapped_soma_ids.is_null() {
+                        anyhow::bail!("gpu_malloc failed for mapped_soma_ids ({} bytes)", somas_bytes);
+                    }
+                    if !ffi::gpu_memcpy_host_to_device(mapped_soma_ids, o.mapped_soma_ids.as_ptr() as *const c_void, somas_bytes) {
+                        anyhow::bail!("Failed to upload mapped_soma_ids to GPU");
+                    }
+
+                    // output_history buffer (u8 per tick per soma)
+                    let history_bytes = (num_mapped_somas as usize) * (readout_batch_ticks as usize);
+                    output_history = ffi::gpu_malloc(history_bytes);
+                    if output_history.is_null() {
+                        anyhow::bail!("gpu_malloc failed for output_history ({} bytes)", history_bytes);
+                    }
+                    // It's good practice to zero it out, though the kernel writes absolutely every byte
+                    // we'll leave it uninitialized on GPU to save time, it will be fully overwritten over the batch ticks.
+                }
+            }
+        }
 
 
 
@@ -169,8 +197,10 @@ impl VramState {
             dendrite_targets,
             dendrite_weights,
             dendrite_refractory,
-            outbound_spikes_buffer,
-            outbound_spikes_count,
+            num_mapped_somas,
+            readout_batch_ticks,
+            mapped_soma_ids,
+            output_history,
         })
     }
 
@@ -278,21 +308,12 @@ impl VramState {
         self.download_generic(self.dendrite_refractory, self.padded_n * MAX_DENDRITE_SLOTS)
     }
 
-    pub fn download_outbound_spikes_count(&self) -> anyhow::Result<u32> {
-        let mut count: u32 = 0;
-        let success = unsafe {
-            ffi::gpu_memcpy_device_to_host(
-                &mut count as *mut _ as *mut c_void,
-                self.outbound_spikes_count,
-                4,
-            )
-        };
-        if !success { anyhow::bail!("Failed to download outbound spikes count") }
-        Ok(count)
-    }
-
-    pub fn download_outbound_spikes_buffer(&self, count: usize) -> anyhow::Result<Vec<u32>> {
-        self.download_generic(self.outbound_spikes_buffer, count)
+    pub fn download_output_history(&self) -> anyhow::Result<Vec<u8>> {
+        if self.num_mapped_somas == 0 || self.readout_batch_ticks == 0 {
+            return Ok(Vec::new());
+        }
+        let total_bytes = (self.num_mapped_somas as usize) * (self.readout_batch_ticks as usize);
+        self.download_generic(self.output_history, total_bytes)
     }
 
     /// Uploads a bitmask array to GPU memory. Used for External Virtual Axons.
@@ -356,20 +377,24 @@ impl VramState {
 impl Drop for VramState {
     fn drop(&mut self) {
         unsafe {
-            ffi::gpu_free(self.voltage);
-            ffi::gpu_free(self.threshold_offset);
-            ffi::gpu_free(self.refractory_timer);
-            ffi::gpu_free(self.flags);
+            if !self.voltage.is_null() { ffi::gpu_free(self.voltage); }
+            if !self.threshold_offset.is_null() { ffi::gpu_free(self.threshold_offset); }
+            if !self.refractory_timer.is_null() { ffi::gpu_free(self.refractory_timer); }
+            if !self.flags.is_null() { ffi::gpu_free(self.flags); }
 
-            ffi::gpu_free(self.axon_head_index);
-            ffi::gpu_free(self.soma_to_axon);
+            if !self.axon_head_index.is_null() { ffi::gpu_free(self.axon_head_index); }
+            if !self.soma_to_axon.is_null() { ffi::gpu_free(self.soma_to_axon); }
 
-            ffi::gpu_free(self.dendrite_targets);
-            ffi::gpu_free(self.dendrite_weights);
-            ffi::gpu_free(self.dendrite_refractory);
+            if !self.dendrite_targets.is_null() { ffi::gpu_free(self.dendrite_targets); }
+            if !self.dendrite_weights.is_null() { ffi::gpu_free(self.dendrite_weights); }
+            if !self.dendrite_refractory.is_null() { ffi::gpu_free(self.dendrite_refractory); }
 
-            ffi::gpu_free(self.outbound_spikes_buffer);
-            ffi::gpu_free(self.outbound_spikes_count);
+            if !self.mapped_soma_ids.is_null() {
+                ffi::gpu_free(self.mapped_soma_ids);
+            }
+            if !self.output_history.is_null() {
+                ffi::gpu_free(self.output_history);
+            }
 
             if !self.map_pixel_to_axon.is_null() {
                 ffi::gpu_free(self.map_pixel_to_axon);
