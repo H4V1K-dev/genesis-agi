@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::config::blueprints::VariantParameters;
+use crate::layout::VariantParameters;
 use std::fmt;
 
 /// 1. DTO: Читается из manifest.toml. Содержит String, живет в куче (Heap).

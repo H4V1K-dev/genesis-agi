@@ -40,25 +40,14 @@ pub fn voxel_to_um(vox: VoxelCoord, voxel_size_um: u32) -> Microns {
     vox as Microns * voxel_size_um as Microns
 }
 
-/// Упаковывает воксельные координаты и тип нейрона в PackedPosition.
-/// Все аргументы проверяются debug_assert в дебаг-билдах.
 #[inline]
 pub fn pack_position(x: u32, y: u32, z: u32, type_mask: u32) -> PackedPosition {
-    debug_assert!(x < 1024, "X={x} exceeds 10-bit range (0..=1023)");
-    debug_assert!(y < 1024, "Y={y} exceeds 10-bit range (0..=1023)");
-    debug_assert!(z < 256,  "Z={z} exceeds 8-bit range (0..=255)");
-    debug_assert!(type_mask < 16, "type_mask={type_mask} exceeds 4-bit range (0..=15)");
-    (type_mask << 28) | (z << 20) | (y << 10) | x
+    PackedPosition::new(x, y, z, type_mask as u8)
 }
 
-/// Распаковывает PackedPosition в `(x, y, z, type_mask)`.
 #[inline]
 pub fn unpack_position(p: PackedPosition) -> (u32, u32, u32, u32) {
-    let x         = p & 0x3FF;
-    let y         = (p >> 10) & 0x3FF;
-    let z         = (p >> 20) & 0xFF;
-    let type_mask = p >> 28;
-    (x, y, z, type_mask)
+    (p.x() as u32, p.y() as u32, p.z() as u32, p.type_id() as u32)
 }
 
 // ---------------------------------------------------------------------------
