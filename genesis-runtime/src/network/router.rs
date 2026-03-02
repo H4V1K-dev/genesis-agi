@@ -159,13 +159,26 @@ impl InterNodeRouter {
                     let zone_hash = header.zone_hash; // Copy to avoid unaligned reference
                     
                     if let Some(ping_pong) = zone_ping_pongs.get(&zone_hash) {
+                        let spike_count = header.count; // Copy to local to avoid alignment issues
                         let events_ptr = unsafe { header_ptr.add(1) as *const SpikeEvent };
-                        let events = unsafe { std::slice::from_raw_parts(events_ptr, header.count as usize) };
+                        let events = unsafe { std::slice::from_raw_parts(events_ptr, spike_count as usize) };
+                        
+                        eprintln!("[Fast Path] Received {} spikes from zone_hash={:x}", spike_count, zone_hash);
+                        
+                        // Log first ghost_id to detect offset bug
+                        if spike_count > 0 {
+                            let first_ghost_id = events[0].ghost_id;
+                            eprintln!("[Fast Path] First ghost_id in batch: {}", first_ghost_id);
+                        }
                         
                         // Атомарно вкидываем спайки в спящий буфер VRAM
                         for event in events {
                             unsafe { ping_pong.ingest_spike(event) };
                         }
+                        
+                        // Signal BSP Barrier: batch received and buffered
+                        let new_count = ping_pong.packets_received.fetch_add(1, std::sync::atomic::Ordering::Release) + 1;
+                        println!("[Fast Path] ✓ BSP signal: packets_received incremented to {}", new_count);
                     }
                 }
             }

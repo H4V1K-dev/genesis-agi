@@ -24,9 +24,9 @@ pub struct VramState {
 
     // Axon State (total_axons length, not padded_n)
     pub total_axons: usize,
-    pub ghost_axons_allocated: usize,
     pub max_ghost_axons: usize,
     pub base_axons: usize,
+    pub available_ghost_slots: Vec<u32>, // FreeList for GC
     pub axon_head_index: *mut c_void,
     pub soma_to_axon: *mut c_void,
     pub axon_tips_uvw: Vec<u32>,
@@ -55,6 +55,7 @@ pub struct VramState {
     pub readout_batch_ticks: u32,
     pub mapped_soma_ids: *mut c_void,   // [total_mapped_somas] u32
     pub output_history: *mut c_void,     // [batch_ticks × total_mapped_somas] u8
+    pub output_history_host: *mut c_void, // Pinned host memory for DMA download
     pub telemetry_spikes: *mut c_void,
     pub telemetry_count: *mut c_void,
     pub telemetry_spikes_host: *mut c_void,
@@ -216,6 +217,7 @@ impl VramState {
         // Readout Buffer Allocation
         let mut mapped_soma_ids = std::ptr::null_mut();
         let mut output_history = std::ptr::null_mut();
+        let mut output_history_host = std::ptr::null_mut();
         let mut num_mapped_somas = 0;
         if let Some(o) = gxo {
             num_mapped_somas = o.soma_ids.len() as u32;
@@ -236,6 +238,12 @@ impl VramState {
                     if output_history.is_null() {
                         anyhow::bail!("gpu_malloc failed for output_history ({} bytes)", history_bytes);
                     }
+                    
+                    // Pinned host memory for DMA Device-to-Host
+                    output_history_host = ffi::gpu_host_alloc(history_bytes);
+                    if output_history_host.is_null() {
+                        anyhow::bail!("gpu_host_alloc failed for output_history_host ({} bytes)", history_bytes);
+                    }
                     // It's good practice to zero it out, though the kernel writes absolutely every byte
                     // we'll leave it uninitialized on GPU to save time, it will be fully overwritten over the batch ticks.
                 }
@@ -244,13 +252,18 @@ impl VramState {
 
 
 
+        let mut available_ghost_slots = Vec::with_capacity(max_ghost_axons);
+        for id in (pa..(pa + max_ghost_axons)).rev() { // Start from base to max, reversed for pop()
+            available_ghost_slots.push(id as u32);
+        }
+
         println!("Zone VRAM Load! num_pixels={}, bitmask_buffer is null: {}", num_pixels, bitmask_buffer.is_null());
 
         Ok(VramState {
             padded_n: pn,
             total_axons,
-            ghost_axons_allocated: 0,
             max_ghost_axons,
+            available_ghost_slots,
             base_axons: pa,
             num_pixels,
             map_pixel_to_axon,
@@ -274,6 +287,7 @@ impl VramState {
             readout_batch_ticks,
             mapped_soma_ids,
             output_history,
+            output_history_host,
             telemetry_spikes,
             telemetry_count,
             telemetry_spikes_host,
@@ -432,17 +446,12 @@ impl VramState {
     }
 
     pub fn allocate_ghost_axon(&mut self) -> Option<u32> {
-        if self.ghost_axons_allocated < self.max_ghost_axons {
-            let id = (self.base_axons + self.ghost_axons_allocated) as u32;
-            self.ghost_axons_allocated += 1;
-            Some(id)
-        } else {
-            None
-        }
+        self.available_ghost_slots.pop()
     }
 
     pub fn free_ghost_axon(&mut self, ghost_id: u32) {
-        if (ghost_id as usize) >= self.base_axons && (ghost_id as usize) < self.base_axons + self.ghost_axons_allocated {
+        if (ghost_id as usize) >= self.base_axons && (ghost_id as usize) < self.base_axons + self.max_ghost_axons {
+            self.available_ghost_slots.push(ghost_id); // Reclaim via FreeList
             let sentinel: u32 = 0x80000000;
             let offset = ghost_id as usize;
             unsafe {
@@ -559,6 +568,9 @@ impl Drop for VramState {
             }
             if !self.output_history.is_null() {
                 ffi::gpu_free(self.output_history);
+            }
+            if !self.output_history_host.is_null() {
+                ffi::gpu_host_free(self.output_history_host);
             }
 
             if !self.map_pixel_to_axon.is_null() {

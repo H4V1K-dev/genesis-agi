@@ -11,15 +11,14 @@ const CHKT_MAGIC: u32 = 0x43484B54; // "CHKT"
 
 /// Выполняет прямой сброс Pinned RAM на диск без аллокаций.
 unsafe fn save_hot_checkpoint(
-    zone_name: &str,
+    artifact_dir: std::path::PathBuf,
     total_ticks: u64,
     padded_n: u32,
     pinned_targets: *const u32,
     pinned_weights: *const i16,
 ) {
-    let path_str = format!("baked/{}/checkpoint_weights.bin", zone_name);
-    let path = Path::new(&path_str);
-    let file = OpenOptions::new().create(true).write(true).truncate(true).open(path).expect("Fatal: Failed to open checkpoint file");
+    let path = artifact_dir.join("checkpoint_weights.bin");
+    let file = OpenOptions::new().create(true).write(true).truncate(true).open(&path).expect("Fatal: Failed to open checkpoint file");
     let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, file);
 
     writer.write_all(&CHKT_MAGIC.to_le_bytes()).unwrap();
@@ -38,16 +37,15 @@ unsafe fn save_hot_checkpoint(
 }
 
 pub unsafe fn load_hot_checkpoint(
-    zone_name: &str,
+    artifact_dir: &Path,
     expected_padded_n: u32,
     pinned_targets: *mut u32,
     pinned_weights: *mut i16,
 ) -> Option<u64> {
-    let path_str = format!("baked/{}/checkpoint_weights.bin", zone_name);
-    let path = Path::new(&path_str);
+    let path = artifact_dir.join("checkpoint_weights.bin");
     if !path.exists() { return None; }
 
-    let mut file = File::open(path).expect("Fatal: Failed to open checkpoint");
+    let mut file = File::open(&path).expect("Fatal: Failed to open checkpoint");
     let mut header = [0u8; 16];
     if file.read_exact(&mut header).is_err() { return None; }
 
@@ -64,13 +62,13 @@ pub unsafe fn load_hot_checkpoint(
     let targets_slice = std::slice::from_raw_parts_mut(pinned_targets as *mut u8, targets_bytes_len);
     let weights_slice = std::slice::from_raw_parts_mut(pinned_weights as *mut u8, weights_bytes_len);
 
-    file.read_exact(targets_slice).unwrap();
-    file.read_exact(weights_slice).unwrap();
+    if file.read_exact(targets_slice).is_err() { return None; }
+    if file.read_exact(weights_slice).is_err() { return None; }
     Some(tick)
 }
 
 pub fn trigger_night_phase(
-    zone_name: String,
+    artifact_dir: std::path::PathBuf,
     total_ticks: u64,
     vram_ptr: *mut crate::memory::VramState, 
     padded_n: u32,
@@ -99,15 +97,24 @@ pub fn trigger_night_phase(
 
             if !pending_handovers.is_empty() {
                 let acks = process_incoming_handovers(
+                    vram,
                     &pending_handovers,
-                    &mut vram.ghost_axons_allocated,
-                    vram.max_ghost_axons as u32,
-                    vram.base_axons as u32,
-                    vram.axon_head_index as *mut u32,
                 );
                 for ack in acks {
                     queues.outgoing_ack.push(ack);
                 }
+            }
+
+            // 0.1.5 Incoming PRUNEs (Node A cut off an axon, Node B frees the slot)
+            let mut pending_prunes = Vec::new();
+            while let Some(prune) = queues.incoming_prune.pop() {
+                pending_prunes.push(prune);
+            }
+            if !pending_prunes.is_empty() {
+                for prune in pending_prunes {
+                    vram.free_ghost_axon(prune.ghost_id);
+                }
+                println!("           Night Phase: FREED {} ghost axons.", queues.incoming_prune.len());
             }
 
             // 0.2 Received ACKs (ACK from remote for our GROW -> Patch Routing Table)
@@ -122,6 +129,35 @@ pub fn trigger_night_phase(
                     &pending_acks,
                     stream as crate::ffi::CudaStream,
                 );
+            }
+
+            // 0.3 Find Dead Axons (Send PRUNE to remote)
+            let head_index = vram.download_axon_head_index().unwrap_or_default();
+            for channel in &inter_node_channels {
+                for i in 0..channel.count as usize {
+                    let local_id = channel.src_indices_host[i];
+                    if head_index.get(local_id as usize) == Some(&0x80000000) {
+                        let mut dst_ghost = vec![0u32; 1];
+                        crate::ffi::gpu_memcpy_device_to_host(
+                            dst_ghost.as_mut_ptr() as *mut std::ffi::c_void, 
+                            channel.dst_ghost_ids_d.add(i) as *const std::ffi::c_void, 
+                            4
+                        );
+                        if dst_ghost[0] != 0 && dst_ghost[0] != 0x80000000 {
+                            queues.outgoing_prune.push(crate::network::slow_path::AxonHandoverPrune {
+                                magic: 0x44454144,
+                                ghost_id: dst_ghost[0],
+                            });
+                            println!("💀 [GC] Emitting PRUNE for dead axon: {}", dst_ghost[0]);
+                            let sentinel: u32 = 0x80000000;
+                            crate::ffi::gpu_memcpy_host_to_device(
+                                channel.dst_ghost_ids_d.add(i) as *mut std::ffi::c_void, 
+                                &sentinel as *const _ as *const std::ffi::c_void, 
+                                4
+                            );
+                        }
+                    }
+                }
             }
 
             // Step 1: GPU Sort & Prune
@@ -188,7 +224,7 @@ pub fn trigger_night_phase(
             crate::ffi::gpu_stream_synchronize(stream as crate::ffi::CudaStream);
 
             // Step 5: Hot Checkpoint Save
-            save_hot_checkpoint(&zone_name, total_ticks, padded_n, vram.pinned_host_targets as *const u32, vram.pinned_host_weights as *const i16);
+            save_hot_checkpoint(artifact_dir, total_ticks, padded_n, vram.pinned_host_targets as *const u32, vram.pinned_host_weights as *const i16);
 
             is_sleeping.store(false, Ordering::Release);
         }
@@ -196,27 +232,22 @@ pub fn trigger_night_phase(
 }
 
 pub unsafe fn process_incoming_handovers(
+    vram: &mut crate::memory::VramState,
     tcp_queue: &[crate::network::slow_path::AxonHandoverEvent],
-    ghost_alloc_counter: &mut usize,
-    max_ghost_capacity: u32,
-    base_ghost_offset: u32,
-    axon_heads_ptr: *mut u32,
 ) -> Vec<crate::network::slow_path::AxonHandoverAck> {
     let mut acks = Vec::with_capacity(tcp_queue.len());
     for event in tcp_queue {
-        if *ghost_alloc_counter >= max_ghost_capacity as usize {
+        if let Some(ghost_id) = vram.allocate_ghost_axon() {
+            // Инициализация Sentinel-ом для предотвращения ложных срабатываний
+            std::ptr::write_volatile((vram.axon_head_index as *mut u32).add(ghost_id as usize), 0x80000000); 
+            acks.push(crate::network::slow_path::AxonHandoverAck {
+                magic: 0x41434B48,
+                local_axon_id: event.local_axon_id,
+                ghost_id,
+            });
+        } else {
             println!("⚠ Ghost Axon capacity reached. Dropping handover.");
-            continue;
         }
-        let ghost_id = base_ghost_offset + (*ghost_alloc_counter as u32);
-        *ghost_alloc_counter += 1;
-        // [AUDIT]: Инициализация Sentinel-ом для предотвращения ложных срабатываний
-        std::ptr::write_volatile(axon_heads_ptr.add(ghost_id as usize), 0x80000000); 
-        acks.push(crate::network::slow_path::AxonHandoverAck {
-            magic: 0x41434B48,
-            local_axon_id: event.local_axon_id,
-            ghost_id,
-        });
     }
     acks
 }

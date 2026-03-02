@@ -1,0 +1,9 @@
+[simulation]
+config = "config/simulation.toml"
+
+[[zone]]
+name = "SensoryCortex"
+blueprints = "config/brains/PingPongBrain/blueprints.toml"
+anatomy = "config/brains/PingPongBrain/SensoryCortex/anatomy.toml"
+io = "config/brains/PingPongBrain/SensoryCortex/io.toml"
+baked_dir = "baked/PingPongBrain/SensoryCortex"

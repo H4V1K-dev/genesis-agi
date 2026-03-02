@@ -10,15 +10,15 @@ use crate::bake::seed::entity_seed;
 
 /// Размер ячейки пространственной решётки (в вокселях).
 /// Кандидат может находиться не дальше CELL_SIZE от сомы → ищем только в 3×3×3 ячейках.
-const CELL_SIZE: u32 = 30;
 
 /// Ключ ячейки пространственной решётки.
 type GridCell = (u32, u32, u32);
 
 /// Строит HashMap: grid_cell → список индексов аксонов, хотя бы один сегмент которых проходит через ячейку.
 /// Позволяет заменить O(N²) полный перебор на O(N × K) поиск по соседям.
-fn build_axon_grid(axons: &[GrownAxon]) -> HashMap<GridCell, Vec<usize>> {
+fn build_axon_grid(axons: &[GrownAxon], cell_size: u32) -> HashMap<GridCell, Vec<usize>> {
     let mut grid: HashMap<GridCell, Vec<usize>> = HashMap::new();
+    let safe_cell_size = cell_size.max(1);
     for (i, ax) in axons.iter().enumerate() {
         // Мы добавляем аксон во все ячейки, через которые он проходит.
         // Чтобы не дублировать ID аксона в одной и той же ячейке:
@@ -30,9 +30,9 @@ fn build_axon_grid(axons: &[GrownAxon]) -> HashMap<GridCell, Vec<usize>> {
             let x = seg & 0x3FF;
             
             let cell = (
-                x / CELL_SIZE,
-                y / CELL_SIZE,
-                z / CELL_SIZE,
+                x / safe_cell_size,
+                y / safe_cell_size,
+                z / safe_cell_size,
             );
             touched_cells.insert(cell);
         }
@@ -65,11 +65,15 @@ pub fn connect_dendrites(
     axons: &[GrownAxon],
     const_mem: &GenesisConstantMemory,
     master_seed: u64,
+    cell_size: u32,
 ) {
     let pn = shard.padded_n;
 
+    // Use a larger search distance for dendrites
+    let search_radius = cell_size as f32;
     // Строим пространственную решётку по tip-позициям аксонов
-    let grid = build_axon_grid(axons);
+    let grid_cell_size = (search_radius / 1.5).ceil() as u32; 
+    let grid = build_axon_grid(axons, grid_cell_size);
 
     println!("Baking: Initiating Rayon parallel dendrite search for {} somas...", neurons.len());
 
@@ -91,9 +95,9 @@ pub fn connect_dendrites(
         let soma_z = neuron.z();
 
         // Диапазон ячеек для поиска
-        let cell_x = soma_x / CELL_SIZE;
-        let cell_y = soma_y / CELL_SIZE;
-        let cell_z = soma_z / CELL_SIZE;
+        let cell_x = soma_x / grid_cell_size;
+        let cell_y = soma_y / grid_cell_size;
+        let cell_z = soma_z / grid_cell_size;
 
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut seen_axons: HashSet<usize> = HashSet::new();
@@ -137,7 +141,7 @@ pub fn connect_dendrites(
                             }
                         }
 
-                        if min_dist > CELL_SIZE as f32 {
+                        if min_dist > search_radius {
                             continue;
                         }
 
@@ -215,8 +219,11 @@ pub fn reconnect_empty_dendrites(
     axons: &[GrownAxon],
     const_mem: &GenesisConstantMemory,
     master_seed: u64,
+    cell_size: u32,
 ) {
-    let grid = build_axon_grid(axons);
+    let search_radius = cell_size as f32;
+    let grid_cell_size = (search_radius / 1.5).ceil() as u32; 
+    let grid = build_axon_grid(axons, grid_cell_size);
 
     for (soma_id, neuron) in neurons.iter().enumerate() {
         // Virtual axons have no dendrite slots — skip them
@@ -240,9 +247,9 @@ pub fn reconnect_empty_dendrites(
         let soma_y = neuron.y();
         let soma_z = neuron.z();
 
-        let cell_x = soma_x / CELL_SIZE;
-        let cell_y = soma_y / CELL_SIZE;
-        let cell_z = soma_z / CELL_SIZE;
+        let cell_x = soma_x / grid_cell_size;
+        let cell_y = soma_y / grid_cell_size;
+        let cell_z = soma_z / grid_cell_size;
 
         let mut candidates: Vec<Candidate> = Vec::new();
 
@@ -294,7 +301,7 @@ pub fn reconnect_empty_dendrites(
                             }
                         }
 
-                        if min_dist > CELL_SIZE as f32 {
+                        if min_dist > search_radius {
                             continue;
                         }
 

@@ -30,9 +30,11 @@ impl PingPongSchedule {
     }
 
     pub fn wait_for_data(&self, last_count: usize) -> usize {
+        println!("[BSP Wait] Waiting for packets_received > {}", last_count);
         loop {
             let current = self.packets_received.load(Ordering::Acquire);
             if current > last_count {
+                println!("[BSP Wait] ✓ Got packets_received={}, returning", current);
                 return current;
             }
             std::hint::spin_loop();

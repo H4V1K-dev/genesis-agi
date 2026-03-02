@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
@@ -30,8 +30,9 @@ fn main() -> Result<()> {
     let mut compiled_zones: std::collections::HashMap<String, (Vec<u32>, usize, Vec<u32>, (f32, f32))> = std::collections::HashMap::new();
 
     // 1. Compile all zones
-    for zone in &brain_config.zones {
-        println!("\n[baker] === Compiling Zone: {} ===", zone.name);
+    for (zone_idx, zone) in brain_config.zones.iter().enumerate() {
+        println!("
+[baker] === Compiling Zone: {} ===", zone.name);
         let result_tuple = compile(
             &brain_config.simulation.config,
             &zone.blueprints,
@@ -39,6 +40,7 @@ fn main() -> Result<()> {
             &zone.io,
             &zone.baked_dir,
             &zone.name,
+            zone_idx as u16,
         )?;
         compiled_zones.insert(zone.name.clone(), result_tuple);
     }
@@ -99,7 +101,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_dir: &Path, zone_name: &str) -> Result<(Vec<u32>, usize, Vec<u32>, (f32, f32))> {
+fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_dir: &Path, zone_name: &str, zone_idx: u16) -> Result<(Vec<u32>, usize, Vec<u32>, (f32, f32))> {
     // --- 1. Parse ---
     println!("[baker] Parsing configs...");
     let sim = parser::simulation::parse(
@@ -107,7 +109,7 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
             .with_context(|| format!("Cannot read {}", sim_path.display()))?,
     )
     .context("Failed to parse simulation.toml")?;
-    let (const_mem, name_map) = parser::blueprints::parse_blueprints(
+    let (const_mem, neuron_types, name_map) = parser::blueprints::parse_blueprints(
         &std::fs::read_to_string(bp_path)
             .with_context(|| format!("Cannot read {}", bp_path.display()))?,
     );
@@ -160,7 +162,7 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
     let (mut axons, mut ghost_packets) = bake::axon_growth::grow_axons(
         &neurons,
         &layer_ranges,
-        &const_mem,
+        &neuron_types,
         &sim,
         &shard_bounds,
         master_seed,
@@ -192,12 +194,16 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
         
         let packed_positions: Vec<u32> = neurons.iter().map(|n| n.position).collect();
         
+        let world_w_vox = sim.world.width_um / sim.simulation.voxel_size_um;
+        let world_d_vox = sim.world.depth_um / sim.simulation.voxel_size_um;
+        
         bake::output_map::bake_outputs(
             out_dir,
             &io,
-            sim.world.width_um as f32,
-            sim.world.depth_um as f32,
+            world_w_vox as f32,
+            world_d_vox as f32,
             &packed_positions,
+            &name_map,
         );
 
         println!(
@@ -272,6 +278,7 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
         &axons,
         &const_mem,
         master_seed,
+        sim.simulation.segment_length_voxels * 8, // conservative search radius
     );
     let connected = shard.dendrite_targets.iter().filter(|&&t| t != 0).count();
     println!(
@@ -286,12 +293,74 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
     shard.dump_to_disk(out_dir);
     println!("[baker] ✓ Written: shard.state + shard.axons");
 
+    // --- 10. Write Autonomous Manifest ---
+    let zone_hash_fnv = genesis_core::hash::fnv1a_32(zone_name.as_bytes());
+    let manifest = genesis_core::config::manifest::ZoneManifest {
+        magic: 0x47454E45, // "GENE"
+        zone_hash: zone_hash_fnv,
+        memory: genesis_core::config::manifest::ManifestMemory {
+            padded_n: shard.soma_to_axon.len(),
+            virtual_axons: num_virtual,
+            ghost_capacity: 200000, // Safe default for V1
+            v_seg: v_seg as u16,
+        },
+        network: genesis_core::config::manifest::ManifestNetwork {
+            slow_path_tcp: 8010 + zone_idx * 10,
+            external_udp_in: 8081 + zone_idx * 10,
+            external_udp_out: 8082 + zone_idx * 10,
+            external_udp_out_target: None,
+            fast_path_udp_local: 9001 + zone_idx * 10,
+            fast_path_peers: if zone_idx == 0 { vec!["127.0.0.1:9011".to_string()] } else { vec!["127.0.0.1:9001".to_string()] },
+        },
+        variants: const_mem.variants.iter().enumerate().map(|(i, v)| {
+            genesis_core::config::manifest::ManifestVariant {
+                id: i as u8,
+                name: format!("Variant_{}", i),
+                threshold: v.threshold,
+                rest_potential: v.rest_potential,
+                leak_rate: v.leak_rate,
+                homeostasis_penalty: v.homeostasis_penalty,
+                homeostasis_decay: v.homeostasis_decay,
+                gsop_potentiation: v.gsop_potentiation,
+                gsop_depression: v.gsop_depression,
+                refractory_period: v.refractory_period,
+                synapse_refractory_period: v.synapse_refractory_period,
+                slot_decay_ltm: v.slot_decay_ltm as u8,
+                slot_decay_wm: v.slot_decay_wm as u8,
+                signal_propagation_length: v.signal_propagation_length,
+            }
+        }).collect(),
+    };
+    
+    let manifest_toml = toml::to_string(&manifest).expect("Failed to serialize manifest");
+    let manifest_path = out_dir.join("manifest.toml");
+    std::fs::write(&manifest_path, manifest_toml)?;
+    println!("[baker] ✓ Written: manifest.toml");
+
+    let dna_dir = out_dir.join("BrainDNA");
+    std::fs::create_dir_all(&dna_dir).expect("Failed to create BrainDNA directory");
+    let configs = [
+        (sim_path, "simulation.toml"),
+        (bp_path, "blueprints.toml"),
+        (an_path, "anatomy.toml"),
+        (io_path, "io.toml"),
+    ];
+    for (src, dst_name) in configs {
+        if src.exists() {
+            std::fs::copy(src, dna_dir.join(dst_name))
+                .unwrap_or_else(|_| panic!("Failed to copy {} to BrainDNA", dst_name));
+        }
+    }
+    println!("[baker] ✓ Written: BrainDNA Artifacts");
+
     println!("[baker] Zone {} Done.", zone_name);
     
     let packed_pos: Vec<u32> = neurons.iter().map(|n| n.position).collect();
-    let size_um = (sim.world.width_um as f32, sim.world.depth_um as f32);
+    let world_w_vox = sim.world.width_um / sim.simulation.voxel_size_um;
+    let world_d_vox = sim.world.depth_um / sim.simulation.voxel_size_um;
+    let size_vox = (world_w_vox as f32, world_d_vox as f32);
     
-    Ok((shard.soma_to_axon.clone(), axons.len(), packed_pos, size_um))
+    Ok((shard.soma_to_axon.clone(), shard.total_axons, packed_pos, size_vox))
 }
 
 /// Формат файла `.axons`:

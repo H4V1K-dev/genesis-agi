@@ -52,8 +52,7 @@ fn write_gxi_binary(
     total_pixels: u32,
     payload: &[u32]
 ) {
-    let shard_name = out_dir.file_name().and_then(|n| n.to_str()).unwrap_or("shard");
-    let path = out_dir.join(format!("{}.gxi", shard_name));
+    let path = out_dir.join("shard.gxi");
     let mut file = BufWriter::new(File::create(path).expect("Failed to create .gxi file"));
 
     // Header (12 bytes)

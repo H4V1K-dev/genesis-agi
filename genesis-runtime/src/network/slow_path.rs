@@ -16,6 +16,13 @@ pub enum GeometryResponse {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AxonHandoverPrune {
+    pub magic: u32,         // 0x44454144 ("DEAD")
+    pub ghost_id: u32,      
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AxonHandoverEvent {
     pub local_axon_id: u32,
     pub entry_x: u16,
@@ -41,6 +48,8 @@ pub struct SlowPathQueues {
     pub outgoing_ack: Arc<SegQueue<AxonHandoverAck>>,
     pub outgoing_grow: Arc<SegQueue<AxonHandoverEvent>>,
     pub incoming_ack: Arc<SegQueue<AxonHandoverAck>>,
+    pub incoming_prune: Arc<SegQueue<AxonHandoverPrune>>,
+    pub outgoing_prune: Arc<SegQueue<AxonHandoverPrune>>,
 }
 
 impl SlowPathQueues {
@@ -50,6 +59,8 @@ impl SlowPathQueues {
             outgoing_ack: Arc::new(SegQueue::new()),
             outgoing_grow: Arc::new(SegQueue::new()),
             incoming_ack: Arc::new(SegQueue::new()),
+            incoming_prune: Arc::new(SegQueue::new()),
+            outgoing_prune: Arc::new(SegQueue::new()),
         }
     }
 }

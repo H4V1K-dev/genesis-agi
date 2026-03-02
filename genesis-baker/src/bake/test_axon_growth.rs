@@ -2,7 +2,7 @@
 mod tests {
     use crate::bake::axon_growth::{grow_axons, LayerZRange, ShardBounds};
     use crate::bake::neuron_placement::PlacedNeuron;
-    use crate::parser::blueprints::NeuronType;
+    use genesis_core::config::blueprints::{NeuronType};
     use crate::parser::simulation::{SimulationConfig, SimulationParams, WorldConfig};
     use genesis_core::coords::pack_position;
 
@@ -49,7 +49,6 @@ mod tests {
             initial_synapse_weight: 100,
             dendrite_whitelist: vec![],
             is_inhibitory: false,
-            sprouting_weight_type: 0.0, // Should be f32
             type_affinity: 1.0, // Follow same type
             inertia_curve: [0; 16],
             ltm_slot_count: 80,
@@ -69,9 +68,10 @@ mod tests {
             axon_growth_step: 10,
             gsop_depression: 10,
             gsop_potentiation: 10,
-            sprouting_weight_distance: 0.0,
-            sprouting_weight_power: 0.0,
-            sprouting_weight_explore: 0.0,
+            sprouting_weight_distance: 0.4,
+            sprouting_weight_power: 0.4,
+            sprouting_weight_explore: 0.1,
+            sprouting_weight_type: 0.1,
             prune_threshold: 10,
         }
     }
@@ -135,7 +135,6 @@ mod tests {
     fn test_axon_length_nonzero() {
         let (sim, layers, types, bounds) = setup_env_v(5, 5, 5);
         let neurons = vec![make_neuron(2, 2, 2, 0)];
-
         let (axons, _) = grow_axons(&neurons, &layers, &types, &sim, &bounds, 42);
         
         assert_eq!(axons.len(), 1);
@@ -202,6 +201,7 @@ mod tests {
         
         // At least Neuron 0 should emit a ghost packet
         assert!(ghosts.len() >= 1);
+
         let gp = ghosts.iter().find(|g| g.soma_idx == 0).expect("Neuron 0 did not cross boundary!");
         assert!(gp.entry_x >= 2 || gp.entry_y >= 2); 
     }
@@ -280,5 +280,21 @@ mod tests {
             assert!(y < 10, "Y OOB: {}", y);
             assert!(z < 10, "Z OOB: {}", z);
         }
+    }
+
+    #[test]
+    fn test_single_layer_growth() {
+        let sim = make_sim_config(40, 40, 20);
+        let layers = vec![
+            LayerZRange { name: "Single".to_string(), z_start_vox: 0, z_end_vox: 20 },
+        ];
+        let types = vec![make_v_type()];
+        let bounds = ShardBounds::full_world(&sim);
+        
+        let neuron = PlacedNeuron { position: pack_position(20, 20, 5, 0), layer_name: "Single".to_string(), type_idx: 0 };
+        
+        let (axons, _) = grow_axons(&[neuron], &layers, &types, &sim, &bounds, 42);
+        
+        assert!(!axons[0].segments.is_empty(), "Axon in single layer should have segments! tip_z was likely equal to soma_z because target_layer was None");
     }
 }

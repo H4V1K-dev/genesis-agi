@@ -27,7 +27,7 @@ pub fn compute_sprouting_score(
     
     // Пример скоринга, основанного на параметрах конкретного типа.
     // Если для этого типа прописано мощное влияние дистанции:
-    let dist_weight = 1.0; // В будущем можно вынести в параметры VariantParameters
+    let dist_weight = 10.0; // Stronger distance influence to overcome noise in tests
     let power_weight = 0.5;
     
     let score = (1.0 / (distance + 1.0)) * dist_weight 

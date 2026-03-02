@@ -31,12 +31,23 @@ Thumbs.db
 # Логи и дампы
 *.log
 *.dump
+*.pid
+*.log.tmp
+*.bak
+*.new
+*.tmp
 
 # Папки
+__pycache__/
 SUMARIZER/
 tests/tmp/
-.agents/
-.agent/
 _agents/
+.agents/
 _agent/
-brain/
+.agent/
+brains/
+baked/
+venv/
+
+# Other
+*.png

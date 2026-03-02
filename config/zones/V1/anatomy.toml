@@ -1,7 +1,0 @@
-[[layer]]
-name = "L1"
-height_pct = 1.0
-population_pct = 1.0
-
-[layer.composition]
-"Vertical_Excitatory" = 1.0

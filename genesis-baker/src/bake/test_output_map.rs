@@ -1,9 +1,11 @@
-use genesis_core::config::{SimulationConfig, BlueprintsConfig, IoConfig};
+use genesis_core::config::{SimulationConfig, BlueprintsConfig, IoConfig, WorldConfig, SimulationParams};
 use genesis_core::config::io::OutputMap;
-use genesis_core::config::{SimulationParams, WorldConfig};
+use genesis_core::constants::{GXO_MAGIC};
 use crate::bake::neuron_placement::PlacedNeuron;
-use crate::bake::output_map::bake_output_maps;
+use crate::bake::output_map::{bake_outputs_to_memory};
 use genesis_core::coords::pack_position;
+
+use std::collections::HashMap;
 
 fn fake_sim() -> SimulationConfig {
     SimulationConfig {
@@ -49,7 +51,9 @@ fn test_bake_output_maps_empty() {
     let blueprints = fake_blueprints();
     let placed = vec![];
 
-    let result = bake_output_maps(&io, "V1", &placed, &blueprints, &sim);
+    let packed: Vec<u32> = placed.iter().map(|n: &PlacedNeuron| n.position).collect();
+    let name_map = HashMap::new();
+    let result = bake_outputs_to_memory(&io, sim.world.width_um as f32, sim.world.depth_um as f32, &packed, &name_map);
     assert!(result.gxo_binary.is_empty());
     assert_eq!(result.num_mapped_somas, 0);
 }
@@ -64,6 +68,7 @@ fn test_bake_output_maps_basic_assignment() {
         target_type: "ALL".to_string(),
         width: 2,
         height: 2,
+        stride: 1,
     }); // 2x2 map, 4 pixels over a 1000x1000 world => each pixel is 500x500
 
     let sim = fake_sim();
@@ -77,7 +82,9 @@ fn test_bake_output_maps_basic_assignment() {
         PlacedNeuron { position: pack_position(750, 750, 0, 0), layer_name: String::new(), type_idx: 0 },
     ];
 
-    let result = bake_output_maps(&io, "V1", &placed, &blueprints, &sim);
+    let packed: Vec<u32> = placed.iter().map(|n: &PlacedNeuron| n.position).collect();
+    let name_map = HashMap::new();
+    let result = bake_outputs_to_memory(&io, sim.world.width_um as f32, sim.world.depth_um as f32, &packed, &name_map);
     
     assert!(!result.gxo_binary.is_empty());
     assert_eq!(result.num_mapped_somas, 4);
@@ -88,7 +95,7 @@ fn test_bake_output_maps_basic_assignment() {
     assert!(result.gxo_binary.len() > 20); // Header + maps
     
     // GXO_MAGIC is 0x47584F30
-    assert_eq!(&result.gxo_binary[0..4], &0x47584F30u32.to_le_bytes());
+    assert_eq!(&result.gxo_binary[0..4], &GXO_MAGIC.to_le_bytes());
 }
 
 #[test]
@@ -100,6 +107,7 @@ fn test_bake_output_maps_type_filtering() {
         target_type: "TypeB".to_string(),
         width: 1,
         height: 1,
+        stride: 1,
     });
 
     let sim = fake_sim();
@@ -111,7 +119,12 @@ fn test_bake_output_maps_type_filtering() {
         PlacedNeuron { position: pack_position(500, 500, 0, 0), layer_name: String::new(), type_idx: 0 }, // TypeA
     ];
 
-    let result = bake_output_maps(&io, "V1", &placed, &blueprints, &sim);
+    let packed: Vec<u32> = placed.iter().map(|n: &PlacedNeuron| n.position).collect();
+    let mut name_map = HashMap::new();
+    name_map.insert("TypeA".to_string(), 0);
+    name_map.insert("TypeB".to_string(), 1);
+
+    let result = bake_outputs_to_memory(&io, sim.world.width_um as f32, sim.world.depth_um as f32, &packed, &name_map);
     assert_eq!(result.num_mapped_somas, 1);
     
     // Check that there is exactly 1 soma ID written at the end of the binary

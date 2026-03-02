@@ -16,7 +16,7 @@ mod tests {
     #[test]
     fn test_single_neuron_found() {
         let neurons = vec![make_neuron(5, 5, 5)];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 2.0);
         let found = grid.get_in_radius(Vec3::new(5.0, 5.0, 5.0), 1.0);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0], 0);
@@ -25,7 +25,7 @@ mod tests {
     #[test]
     fn test_out_of_radius() {
         let neurons = vec![make_neuron(0, 0, 0)];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 2.0);
         let found = grid.get_in_radius(Vec3::new(100.0, 100.0, 100.0), 3.0);
         assert!(found.is_empty());
     }
@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn test_radius_boundary() {
         let neurons = vec![make_neuron(4, 0, 0)];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 2.0);
         
         // 4 units away. If cell size is 2.0, requesting from (0,0,0) with r=3.9
         // will check cx from flooor(-3.9/2)=-2 to floor(3.9/2)=1.
@@ -54,14 +54,14 @@ mod tests {
             make_neuron(5, 5, 5),
             make_neuron(10, 10, 10),
         ];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 2.0);
         let found = grid.get_in_radius(Vec3::new(5.0, 5.0, 5.0), 10.0);
         assert_eq!(found.len(), 3); // All should be found
     }
 
     #[test]
     fn test_empty_grid() {
-        let grid = SpatialGrid::new(&[]);
+        let grid = SpatialGrid::new(&[], 2.0);
         let found = grid.get_in_radius(Vec3::ZERO, 100.0);
         assert!(found.is_empty());
     }
@@ -73,7 +73,7 @@ mod tests {
             make_neuron(1, 1, 1),
             make_neuron(1, 1, 1),
         ];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 2.0);
         let found = grid.get_in_radius(Vec3::new(1.0, 1.0, 1.0), 1.0);
         assert_eq!(found.len(), 3);
         

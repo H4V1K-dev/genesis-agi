@@ -59,7 +59,13 @@ def udp_hot_loop():
             m2 = encode_population(obs[i+12], -1.2, 1.2, neurons=16) 
             prop_words.append(m1 | (m2 << 16))
         
-        prop_payload = struct.pack(f"<III{len(prop_words)}I", ZONE_HASH, MATRIX_PROP_HASH, len(prop_words)*4, *prop_words)
+        # Calculate instant dopamine reward based on forward speed (obs[13] contains velocity in X roughly, or we can use diff in state.last_x)
+        current_x = state.obs[0]
+        dx = current_x - state.last_x
+        # Base scale: 0.05 step usually means good speed. Map to [-1024, 1024].
+        dopamine = int(np.clip(dx * 10000.0, -1024, 1024))
+        
+        prop_payload = struct.pack(f"<IIIhH{len(prop_words)}I", ZONE_HASH, MATRIX_PROP_HASH, len(prop_words)*4, dopamine, 0, *prop_words)
         sock.sendto(prop_payload, (GENESIS_IP, PORT_OUT))
 
         # 2. Vestibular (8 gyro values -> 8 populations of 8 neurons)
@@ -70,7 +76,7 @@ def udp_hot_loop():
                 v.append(encode_population(obs[i+j+3], -2.5, 2.5, neurons=8))
             vest_words.append(v[0] | (v[1] << 8) | (v[2] << 16) | (v[3] << 24))
             
-        vest_payload = struct.pack(f"<III{len(vest_words)}I", ZONE_HASH, MATRIX_VEST_HASH, len(vest_words)*4, *vest_words)
+        vest_payload = struct.pack(f"<IIIhH{len(vest_words)}I", ZONE_HASH, MATRIX_VEST_HASH, len(vest_words)*4, dopamine, 0, *vest_words)
         sock.sendto(vest_payload, (GENESIS_IP, PORT_OUT))
 
         # 3. Tactile (4 feet -> 4 neurons)
@@ -79,7 +85,7 @@ def udp_hot_loop():
             if obs[i] > 0.0: 
                 tact_mask |= (1 << i)
         
-        tact_payload = struct.pack(f"<IIII", ZONE_HASH, MATRIX_TACT_HASH, 4, tact_mask)
+        tact_payload = struct.pack(f"<IIIhHI", ZONE_HASH, MATRIX_TACT_HASH, 4, dopamine, 0, tact_mask)
         sock.sendto(tact_payload, (GENESIS_IP, PORT_OUT))
         
         # --- DECODING ANTAGONISTIC MUSCLES ---

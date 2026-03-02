@@ -6,6 +6,7 @@ pub mod input;
 pub mod ipc;
 pub mod ffi;
 pub mod tui;
+pub mod simple_reporter;
 
 #[cfg(feature = "mock-gpu")]
 pub mod mock_ffi;

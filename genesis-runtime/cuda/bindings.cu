@@ -27,32 +27,27 @@ struct SoA_State {
   uint32_t *telemetry_count;
 };
 
-// Строгое выравнивание в 64 байта, как в Rust
-struct VariantParameters {
+// Общий размер 28 байт. Выравнивание (align) = 4.
+struct GpuVariantParameters {
   int32_t threshold;
   int32_t rest_potential;
   int32_t leak_rate;
   int32_t homeostasis_penalty;
-
+  uint16_t homeostasis_decay;
   int16_t gsop_potentiation;
   int16_t gsop_depression;
-  uint16_t homeostasis_decay;
-  uint16_t signal_propagation_length;
-  uint16_t conduction_velocity;
-  uint16_t slot_decay_ltm;
-  uint16_t slot_decay_wm;
-
   uint8_t refractory_period;
   uint8_t synapse_refractory_period;
-
-  uint8_t inertia_curve[16];
-  uint8_t _reserved[16];
+  uint8_t slot_decay_ltm;
+  uint8_t slot_decay_wm;
+  uint16_t signal_propagation_length;
+  uint16_t _padding; // Выравнивание до 28 байт
 };
 }
 
-// Глобальная константная память GPU (1024 байта).
-// L1 кеш раздаст эти параметры всем варпам за 1 такт.
-__constant__ VariantParameters VARIANT_LUT[16];
+// Глобальная константная память GPU (448 байт).
+__constant__ GpuVariantParameters VARIANT_LUT[16];
+__constant__ int16_t current_dopamine;
 
 // Константы (совпадают с constants.rs)
 #define MAX_DENDRITE_SLOTS 128
@@ -144,7 +139,7 @@ __global__ void update_neurons_kernel(const SoA_State state,
   uint8_t type_idx = (flag >> 4) & 0xF;
 
   // Broadcast Read: загрузка параметров физики из L1 за 1 такт
-  VariantParameters variant = VARIANT_LUT[type_idx];
+  GpuVariantParameters variant = VARIANT_LUT[type_idx];
 
   // 1. Refractory Gate (Hard Limit)
   uint8_t ref_timer = state.refractory_timer[tid];
@@ -243,7 +238,7 @@ __global__ void apply_gsop_kernel(const SoA_State state, uint32_t padded_n) {
     return;
 
   uint8_t type_idx = (flag >> 4) & 0xF;
-  VariantParameters variant = VARIANT_LUT[type_idx];
+  GpuVariantParameters variant = VARIANT_LUT[type_idx];
 
   for (int slot = 0; slot < MAX_DENDRITE_SLOTS; ++slot) {
     uint32_t col_idx = slot * padded_n + tid; // 100% Coalesced Memory Access
@@ -260,14 +255,18 @@ __global__ void apply_gsop_kernel(const SoA_State state, uint32_t padded_n) {
     if (rank > 15)
       rank = 15;
 
-    int32_t inertia = variant.inertia_curve[rank];
+    int32_t inertia =
+        128 -
+        (rank * 8); // Инерция, жестко заданная формулой взамен старой таблицы
     uint8_t timer = state.dendrite_timers[col_idx];
 
     int32_t delta = 0;
     // Timer-as-Contact-Flag: Если таймер равен рефрактерности синапса — значит
     // этот дендрит касался активного хвоста сигнала именно в этом тике.
     if (timer == variant.synapse_refractory_period) {
-      delta = (variant.gsop_potentiation * inertia) >> 7; // Усиление
+      int32_t modulated_pot =
+          (variant.gsop_potentiation * current_dopamine) >> 8;
+      delta = (modulated_pot * inertia) >> 7; // Усиление (R-STDP Modulated)
     } else {
       delta = -((variant.gsop_depression * inertia) >> 7); // Ослабление (LTD)
     }
@@ -369,14 +368,22 @@ void gpu_stream_synchronize(cudaStream_t stream) {
 void gpu_device_synchronize() { cudaDeviceSynchronize(); }
 
 void gpu_load_constants(const void *host_ptr) {
-  // Копируем 1024 байта (16 * 64) напрямую в symbol VARIANT_LUT
-  cudaMemcpyToSymbol(VARIANT_LUT, host_ptr, 1024, 0, cudaMemcpyHostToDevice);
+  // Копируем 448 байт (16 * 28) напрямую в symbol VARIANT_LUT
+  cudaMemcpyToSymbol(VARIANT_LUT, host_ptr, 448, 0, cudaMemcpyHostToDevice);
 }
 
-void update_constant_memory_hot_reload(const void *new_variants, cudaStream_t stream) {
+void update_constant_memory_hot_reload(const GpuVariantParameters *new_variants,
+                                       cudaStream_t stream) {
   // Асинхронно копируем новые параметры в константную память,
   // обеспечивая Zero-Downtime Hot-Reload на барьере BSP.
-  cudaMemcpyToSymbolAsync(VARIANT_LUT, new_variants, 1024, 0, cudaMemcpyHostToDevice, stream);
+  cudaMemcpyToSymbolAsync(VARIANT_LUT, new_variants,
+                          sizeof(GpuVariantParameters) * 16, 0,
+                          cudaMemcpyHostToDevice, (cudaStream_t)stream);
+}
+
+extern "C" void update_global_dopamine(int16_t dopamine, void *stream) {
+  cudaMemcpyToSymbolAsync(current_dopamine, &dopamine, sizeof(int16_t), 0,
+                          cudaMemcpyHostToDevice, (cudaStream_t)stream);
 }
 
 // Ланчеры. Мы распаковываем указатель на VramState и передаем структуру по

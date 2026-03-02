@@ -17,7 +17,7 @@ mod tests {
     #[test]
     fn test_single_target_directly_ahead() {
         let neurons = vec![make_neuron(0, 0, 5, 0)];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 10.0);
         
         let head_pos = Vec3::ZERO;
         let forward_dir = Vec3::Z;
@@ -37,7 +37,7 @@ mod tests {
     fn test_target_outside_cone() {
         // Target is at +X
         let neurons = vec![make_neuron(10, 0, 0, 0)];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 20.0);
         
         let head_pos = Vec3::ZERO;
         let forward_dir = Vec3::Z; // Facing +Z
@@ -57,7 +57,7 @@ mod tests {
     fn test_target_behind() {
         // Target is behind (-Z)
         let neurons = vec![make_neuron(0, 0, 0, 0)]; // Target at 0,0,0
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 10.0);
         
         let head_pos = Vec3::new(0.0, 0.0, 5.0); // We are at Z=5
         let forward_dir = Vec3::Z; // Facing +Z (away from target)
@@ -86,7 +86,7 @@ mod tests {
             make_neuron(7, 5, 5, 0),
             make_neuron(3, 5, 5, 0),
         ];
-        let grid = SpatialGrid::new(&neurons2);
+        let grid = SpatialGrid::new(&neurons2, 20.0);
         
         let head_pos = Vec3::new(5.0, 5.0, 0.0);
         let forward_dir = Vec3::Z;
@@ -108,7 +108,7 @@ mod tests {
             make_neuron(7, 5, 5, 0),  // A: dx=2, dy=0, dz=5. Dist^2 = 29
             make_neuron(15, 5, 5, 0), // B: dx=10, dy=0, dz=5. Dist^2 = 125
         ];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 20.0);
         let head_pos = Vec3::new(5.0, 5.0, 0.0);
         let forward_dir = Vec3::Z;
         
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn test_type_affinity_zero() {
         let neurons = vec![make_neuron(0, 0, 5, 0)]; // Type 0
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 10.0);
         
         // Owner is Type 0, affinity = 0.0
         let v_attract = calculate_v_attract(
@@ -143,7 +143,7 @@ mod tests {
             make_neuron(5, 0, 5, 0), // Type 0 (Same)
             make_neuron(0, 5, 5, 1), // Type 1 (Diff)
         ];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 20.0);
         
         // Owner is Type 0, affinity = 1.0
         let v_attract = calculate_v_attract(
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn test_self_exclusion() {
         let neurons = vec![make_neuron(0, 0, 5, 0)]; // Target
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 10.0);
         
         // Target is at idx 0, and our owner_soma_idx is ALSO 0
         let v_attract = calculate_v_attract(
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_no_targets() {
-        let grid = SpatialGrid::new(&[]);
+        let grid = SpatialGrid::new(&[], 10.0);
         let v_attract = calculate_v_attract(
             Vec3::ZERO, Vec3::Z, 0.0, 10.0,
             &grid, &[], 0, usize::MAX, 1.0
@@ -186,7 +186,7 @@ mod tests {
         // Target exactly at head pos. Distance = 0.
         // Needs to not panic (e.g. div by zero or sqrt of negative)
         let neurons = vec![make_neuron(5, 5, 5, 0)];
-        let grid = SpatialGrid::new(&neurons);
+        let grid = SpatialGrid::new(&neurons, 10.0);
         
         let head_pos = Vec3::new(5.0, 5.0, 5.0);
         

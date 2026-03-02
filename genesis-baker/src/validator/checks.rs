@@ -13,14 +13,15 @@ pub fn validate_all(
     check_layer_heights(anatomy)?;
     check_layer_populations(anatomy)?;
     check_composition_quotas(anatomy)?;
-    run_all_checks(const_mem);
+    run_all_checks(const_mem)?;
     Ok(())
 }
 
 /// Главный валидатор архитектуры. Вызывается перед началом запекания шарда.
-pub fn run_all_checks(const_mem: &GenesisConstantMemory) {
+pub fn run_all_checks(const_mem: &GenesisConstantMemory) -> anyhow::Result<()> {
     validate_gsop_dead_zones(const_mem);
-    validate_refractory_physics(const_mem);
+    check_single_spike_in_flight(const_mem)?;
+    Ok(())
 }
 
 /// Проверка инварианта: (potentiation * inertia) >> 7 >= 1
@@ -41,8 +42,7 @@ fn validate_gsop_dead_zones(const_mem: &GenesisConstantMemory) {
     }
 }
 
-/// Проверка целочисленной физики
-fn validate_refractory_physics(const_mem: &GenesisConstantMemory) {
+pub fn check_single_spike_in_flight(const_mem: &GenesisConstantMemory) -> anyhow::Result<()> {
     for (type_idx, variant) in const_mem.variants.iter().enumerate() {
         // Если сигнал идет по аксону быстрее, чем сома выходит из рефрактерности, 
         // мы нарушаем инвариант Single-Tick Pulse (получим 2 спайка в одном аксоне)
@@ -52,12 +52,14 @@ fn validate_refractory_physics(const_mem: &GenesisConstantMemory) {
             continue;
         }
 
-        assert!(
-            variant.signal_propagation_length >= variant.refractory_period as u16,
-            "Validation failed for type_idx '{}': signal_propagation_length ({}) cannot be less than refractory_period ({}).",
-            type_idx, variant.signal_propagation_length, variant.refractory_period
-        );
+        if variant.signal_propagation_length < variant.refractory_period as u16 {
+            bail!(
+                "Validation failed for type_idx '{}': §1.6 violation: signal_propagation_length ({}) cannot be less than refractory_period ({}).",
+                type_idx, variant.signal_propagation_length, variant.refractory_period
+            );
+        }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +76,27 @@ pub fn check_v_seg_divisible(sim: &SimulationConfig) -> anyhow::Result<()> {
     )
     .map(|_| ())
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+pub fn check_propagation_covers_v_seg(sim: &SimulationConfig, const_mem: &GenesisConstantMemory) -> anyhow::Result<()> {
+    let phys = genesis_core::physics::compute_derived_physics(
+        sim.simulation.signal_speed_um_tick as u32,
+        sim.simulation.voxel_size_um,
+        sim.simulation.segment_length_voxels,
+    ).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    for (type_idx, variant) in const_mem.variants.iter().enumerate() {
+        if variant.signal_propagation_length == 0 { continue; }
+        
+        if variant.signal_propagation_length < phys.v_seg as u16 {
+            bail!(
+                "Validation failed for type_idx '{}': §1.1 violation: signal_propagation_length ({}) < v_seg ({}). \
+                Signal will jump over the entire axon in one tick.",
+                type_idx, variant.signal_propagation_length, phys.v_seg
+            );
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

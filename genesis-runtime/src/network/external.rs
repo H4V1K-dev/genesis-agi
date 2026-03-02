@@ -10,6 +10,8 @@ pub struct ExternalIoHeader {
     pub zone_hash: u32,
     pub matrix_hash: u32,
     pub payload_size: u32,
+    pub global_reward: i16,
+    pub _padding: u16,
 }
 
 const IO_HEADER_SIZE: usize = std::mem::size_of::<ExternalIoHeader>();
@@ -23,6 +25,9 @@ pub struct ExternalIoServer {
     // Атомик для сигнализации оркестратору, что пришел новый кадр
     pub new_frame_ready: Arc<AtomicUsize>, 
     
+    // R-STDP Dopamine Modulator (Global Reward Broadcast)
+    pub global_dopamine: Arc<std::sync::atomic::AtomicI32>, 
+
     pub dashboard: Option<Arc<crate::tui::DashboardState>>,
     
     // Mapping: matrix_hash -> offset_in_pinned_words
@@ -42,6 +47,7 @@ impl ExternalIoServer {
             pinned_input_ptr,
             max_payload_bytes,
             new_frame_ready: Arc::new(AtomicUsize::new(0)),
+            global_dopamine: Arc::new(std::sync::atomic::AtomicI32::new(0)),
             dashboard: None,
             matrix_offsets: std::collections::HashMap::new(),
         }
@@ -49,7 +55,8 @@ impl ExternalIoServer {
 
     /// Запуск бесконечного цикла прослушивания
     pub async fn run_rx_loop(&self) {
-        let mut buf = [0u8; 65535]; // Хард-лимит UDP пакета. Обошлись без аллокаций в куче.
+        println!("🚀 [ExternalIO] UDP Receiver Loop Started on {}", self.socket.local_addr().unwrap());
+        let mut buf = [0u8; 65536]; // Хард-лимит UDP пакета. Обошлись без аллокаций в куче.
 
         loop {
             match self.socket.recv_from(&mut buf).await {
@@ -68,6 +75,13 @@ impl ExternalIoServer {
                             continue; 
                         }
 
+                        // Update global dopamine reward for R-STDP
+                        self.global_dopamine.store(header.global_reward as i32, Ordering::Relaxed);
+                        if header.global_reward != 0 {
+                            let reward = header.global_reward;
+                            println!("💉 [Dopamine] Reward Received: {}", reward);
+                        }
+
                         // Find offset for this matrix
                         let matrix_hash_val = header.matrix_hash;
                         let offset = self.matrix_offsets.get(&matrix_hash_val).copied().unwrap_or(0);
@@ -84,8 +98,13 @@ impl ExternalIoServer {
 
                         // Сигнализируем CPU-Оркестратору, что Pinned RAM обновлена
                         self.new_frame_ready.store(1, Ordering::Release);
+                        
+                        // Debug log for tracking input
                         if let Some(dash) = &self.dashboard {
                             dash.udp_in_packets.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            // Log every 50th packet to avoid spamming too hard, or just log all for debug
+                            // eprintln!("[ExternalIO] Received frame, payload={} bytes", payload_bytes);
                         }
                     }
                 }
@@ -119,6 +138,9 @@ impl ExternalIoServer {
 
 
         let _ = self.socket.send_to(&out_buf, target_addr).await;
+        
+        eprintln!("[ExternalIO] Sent output batch to {}, {} bytes", target_addr, output_bytes);
+        
         if let Some(dash) = &self.dashboard {
             dash.udp_out_packets.fetch_add(1, Ordering::Relaxed);
         }

@@ -11,11 +11,13 @@ pub mod anatomy;
 pub mod io;
 pub mod instance;
 pub mod brain;
+pub mod manifest;
 
 pub use blueprints::{BlueprintsConfig, NeuronType};
 pub use anatomy::{AnatomyConfig, LayerConfig};
 pub use io::{IoConfig, InputMap};
 pub use instance::InstanceConfig;
+pub use manifest::*;
 
 /// Полный распарсенный конфиг `simulation.toml`.
 #[derive(Debug, Deserialize, Clone)]

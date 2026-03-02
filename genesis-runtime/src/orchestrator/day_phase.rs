@@ -1,16 +1,13 @@
-use crate::network::router::SpikeRouter;
-use crate::network::channel::Channel;
-use crate::zone_runtime::ZoneRuntime;
 use std::ffi::c_void;
-use crate::Runtime;
 use crate::ffi;
 
 pub fn execute_day_batch(
-    zone: &mut ZoneRuntime, 
+    zone: &mut crate::zone_runtime::ZoneRuntime, 
     batch_ticks: u32, 
     stream: crate::ffi::CudaStream,
     telemetry_tx: Option<&tokio::sync::broadcast::Sender<crate::network::telemetry::TelemetryPayload>>,
-    total_ticks: u64
+    total_ticks: u64,
+    global_dopamine: i16
 ) {
 
     // Zero-Downtime Hot-Reload & Async Constant Memory injection
@@ -20,11 +17,12 @@ pub fn execute_day_batch(
         mem_updated = true;
     }
     if mem_updated {
-        println!("🚀 [Hot-Reload] 1024 bytes of VariantParameters injected to VRAM __constant__!");
+        println!("🚀 [Hot-Reload] 448 bytes of GpuVariantParameters injected to VRAM __constant__!");
     }
     unsafe {
+        ffi::update_global_dopamine(global_dopamine, stream);
         ffi::update_constant_memory_hot_reload(
-            &zone.const_mem as *const _ as *const std::ffi::c_void,
+            zone.const_mem.as_ptr(),
             stream,
         );
     }
@@ -82,7 +80,19 @@ pub fn execute_day_batch(
             }
 
             let is_sleeping = zone.is_sleeping.load(std::sync::atomic::Ordering::Acquire);
+            
+            // Log spike buffer before applying
+            let spike_count_in_buffer = unsafe { std::ptr::read_volatile(counts_buffer.add(current_tick as usize)) };
+            if spike_count_in_buffer > 0 || current_tick == 0 {
+                eprintln!("[Day Phase] Zone={} Tick={} is_sleeping={} spike_count={} schedule_buffer={:p}", 
+                    zone.name, current_tick, is_sleeping, spike_count_in_buffer, schedule_buffer);
+            }
+            
             if !is_sleeping {
+                if spike_count_in_buffer > 0 {
+                    eprintln!("[GPU Apply] Zone={} Tick={} launching apply_spike_batch with {} spikes", zone.name, current_tick, spike_count_in_buffer);
+                }
+                
                 ffi::launch_apply_spike_batch(vram_ptr, schedule_buffer, counts_buffer, current_tick as u32, max_spikes_per_tick, stream);
                 ffi::launch_propagate_axons(vram_ptr, total_axons, v_seg, stream);
                 ffi::launch_update_neurons(vram_ptr, padded_n, stream);
@@ -90,26 +100,42 @@ pub fn execute_day_batch(
             }
 
             if num_output_channels > 0 && !mapped_soma_ids.is_null() {
+                eprintln!("[RecordReadout] Zone={} Tick={} num_output_channels={} mapped_soma_ids={:p}", 
+                    zone.name, current_tick, num_output_channels, mapped_soma_ids);
                 ffi::launch_record_readout(
                     vram_ptr, mapped_soma_ids, num_output_channels, current_tick as u32, stream
                 );
+            } else if num_output_channels > 0 {
+                eprintln!("[RecordReadout] WARNING: num_output_channels={} but mapped_soma_ids is NULL!", num_output_channels);
+            } else {
+                eprintln!("[RecordReadout] SKIP: num_output_channels=0 (this is only Node B with output role)");
             }
         }
     }
 
     zone.runtime.synchronize();
     
+    // Информационный лог: параметры выходного канала
+    // DMA Device-to-Host для UDP выполняется в main.rs после gpu_stream_synchronize
+    if num_output_channels > 0 {
+        eprintln!(
+            "[Output] Zone={} num_output_channels={}, batch_ticks={}. DMA will happen in main.rs after stream sync.",
+            zone.name, num_output_channels, batch_ticks
+        );
+    }
+
     if let Some(tx) = telemetry_tx {
         let mut h_count: u32 = 0;
         unsafe {
             ffi::gpu_memcpy_device_to_host_async(
-                &mut h_count as *mut _ as *mut std::ffi::c_void,
+                &mut h_count as *mut _ as *mut c_void,
                 zone.runtime.vram.telemetry_count as *const _,
                 4,
-                stream,
+                std::ptr::null_mut(),
             );
-            ffi::gpu_stream_synchronize(stream); // Ждем счетчик
         }
+
+        eprintln!("[Telemetry] Zone={} Batch output spikes: {}", zone.name, h_count);
 
         let safe_count = std::cmp::min(h_count, 500_000);
 
@@ -119,9 +145,8 @@ pub fn execute_day_batch(
                     zone.runtime.vram.telemetry_spikes_host,
                     zone.runtime.vram.telemetry_spikes as *const _,
                     (safe_count as usize) * 4,
-                    stream,
+                    std::ptr::null_mut(),
                 );
-                ffi::gpu_stream_synchronize(stream);
             }
 
             let spikes = unsafe {

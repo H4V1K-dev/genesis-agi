@@ -1,13 +1,13 @@
 [world]
-width_um = 7500
-depth_um = 7500
-height_um = 2500
+width_um = 1500
+depth_um = 1500
+height_um = 1500
 
 [simulation]
 tick_duration_us = 100
 total_ticks = 10000
 master_seed = "GENESIS"
-global_density = 0.05
+global_density = 0.04
 voxel_size_um = 25
 signal_speed_um_tick = 100
 segment_length_voxels = 2

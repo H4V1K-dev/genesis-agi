@@ -1,8 +1,8 @@
 use crate::bake::neuron_placement::PlacedNeuron;
 use crate::bake::seed::{entity_seed, random_f32};
-use crate::parser::anatomy::Anatomy;
+use genesis_core::config::blueprints::{GenesisConstantMemory, NeuronType};
 use crate::parser::simulation::SimulationConfig;
-use genesis_core::config::blueprints::GenesisConstantMemory;
+use crate::parser::anatomy::Anatomy;
 
 /// Выращенный аксон готовый к записи в ShardStateSoA.
 #[derive(Debug, Clone)]
@@ -124,7 +124,7 @@ use glam::Vec3;
 pub fn grow_axons(
     neurons: &[PlacedNeuron],
     layer_ranges: &[LayerZRange],
-    const_mem: &GenesisConstantMemory,
+    types: &[NeuronType],
     sim: &SimulationConfig,
     shard_bounds: &ShardBounds,
     master_seed: u64,
@@ -135,12 +135,13 @@ pub fn grow_axons(
 
     use rayon::prelude::*;
 
-    let spatial_grid = SpatialGrid::new(neurons);
+    let max_search_radius_vox = sim.simulation.segment_length_voxels as f32 * 3.0;
+    let spatial_grid = SpatialGrid::new(neurons, max_search_radius_vox);
 
     let results: Vec<(GrownAxon, Option<GhostPacket>)> = neurons
         .par_iter()
         .enumerate()
-        .map(|(soma_idx, neuron)| {
+        .map(|(soma_idx, neuron): (usize, &PlacedNeuron)| {
             let soma_z = neuron.z();
             let soma_x = neuron.x();
             let soma_y = neuron.y();
@@ -150,7 +151,7 @@ pub fn grow_axons(
                 soma_x, soma_y, soma_z,
                 soma_idx,
                 type_idx as u8,
-                const_mem,
+                types,
                 sim,
                 world_w_vox, world_d_vox, world_h_vox,
                 layer_ranges,
@@ -173,7 +174,7 @@ pub fn grow_single_axon(
     soma_x: u32, soma_y: u32, soma_z: u32,
     soma_idx: usize,
     type_idx: u8,
-    const_mem: &GenesisConstantMemory,
+    types: &[NeuronType],
     sim: &SimulationConfig,
     world_w_vox: u32, world_d_vox: u32, world_h_vox: u32,
     layer_ranges: &[LayerZRange],
@@ -185,9 +186,9 @@ pub fn grow_single_axon(
     use crate::bake::cone_tracing::calculate_v_attract;
 
     // Чтение параметров роста за O(1) из плоского массива:
-    let variant = &const_mem.variants[type_idx as usize];
-    let _max_length = variant.signal_propagation_length;
-    let _velocity = variant.conduction_velocity;
+    let type_params = &types[type_idx as usize];
+    let _max_length = type_params.signal_propagation_length;
+    let _velocity = type_params.conduction_velocity;
 
     // 1. Найдём слой сомы (Index_home)
     let home_layer = layer_ranges.iter().find(|l| soma_z >= l.z_start_vox && soma_z < l.z_end_vox);
@@ -205,16 +206,25 @@ pub fn grow_single_axon(
     let (target_z_start, target_z_end) = match target_layer {
         Some(l) => (l.z_start_vox, l.z_end_vox),
         None => {
-            // Верхний слой — аксон тянется вниз к предыдущему
-            layer_ranges
-                .first()
-                .map_or((0u32, 1u32), |l| (l.z_start_vox, l.z_end_vox))
+            if layer_ranges.len() == 1 {
+                // Одиночный слой: растём к противоположной границе мира
+                if soma_rel_z < 0.5 {
+                    (world_h_vox, world_h_vox.saturating_add(1))
+                } else {
+                    (0, 1)
+                }
+            } else {
+                // Если слоёв много, а мы в верхнем — тянемся вниз к самому первому
+                layer_ranges
+                    .first()
+                    .map_or((0u32, 1u32), |l| (l.z_start_vox, l.z_end_vox))
+            }
         }
     };
 
     // 4. Target_Z = target_z_start + Soma_Rel_Z × target_height
     let target_h = (target_z_end - target_z_start).max(1) as f32;
-    let tip_z = (target_z_start as f32 + soma_rel_z * target_h) as u32;
+    let tip_z = (target_z_start as f32 + (soma_rel_z * target_h).round()) as u32; // Use round to avoid truncation
     let tip_z = tip_z.clamp(target_z_start, target_z_end).min(255);
 
     // Global segment length from config (fixed for all types)
@@ -222,17 +232,16 @@ pub fn grow_single_axon(
     let cone_seed = entity_seed(master_seed, soma_idx as u32);
     let owner_type_mask = type_idx; // 4-bit mask
     
-    // TODO: Steering params — вынести в VariantParameters или отдельный CPU-конфиг
-    let fov_cos = (45.0_f32 / 2.0).to_radians().cos();
-    let max_search_radius_vox = 100.0 / (sim.simulation.voxel_size_um as f32);
-    let weight_inertia = 0.6_f32;
-    let weight_sensor = 0.3_f32;
-    let weight_jitter = 0.1_f32;
+    let fov_cos = (type_params.steering_fov_deg / 2.0).to_radians().cos();
+    let max_search_radius_vox = type_params.steering_radius_um / sim.simulation.voxel_size_um as f32;
+    let weight_inertia = type_params.steering_weight_inertia;
+    let weight_sensor = type_params.steering_weight_sensor;
+    let weight_jitter = type_params.steering_weight_jitter;
 
-    // V_global (Goal) — bias определяет вертикальный vs горизонтальный рост
-    let bias = 0.8_f32; // TODO: вынести в CPU-конфиг
+    let bias = type_params.growth_vertical_bias;
     let type_idx_usize = type_idx as usize;
-    let is_horizontal = bias < 0.5;
+    let is_horizontal = bias < 0.1; // Only pure horizontal if bias is very low (e.g. 0.0)
+
 
     let mut current_pos = Vec3::new(soma_x as f32, soma_y as f32, soma_z as f32);
     let is_growing_up = tip_z >= soma_z;
@@ -411,7 +420,8 @@ pub fn inject_ghost_axons(
     let world_h_vox = sim.world.height_um / sim.simulation.voxel_size_um;
     let segment_length_vox = sim.simulation.segment_length_voxels as f32;
 
-    let spatial_grid = SpatialGrid::new(neurons);
+    let max_search_radius_vox = sim.simulation.segment_length_voxels as f32 * 3.0;
+    let spatial_grid = SpatialGrid::new(neurons, max_search_radius_vox);
     let mut grown = Vec::with_capacity(ghost_packets.len());
     let mut outgoing: Vec<GhostPacket> = Vec::new();
 
@@ -419,7 +429,7 @@ pub fn inject_ghost_axons(
         let _variant = &const_mem.variants[packet.type_idx.min(15)];
         // TODO: Steering params — вынести в VariantParameters или CPU-конфиг
         let fov_cos = (45.0_f32 / 2.0).to_radians().cos();
-        let max_search_radius_vox = 100.0 / (sim.simulation.voxel_size_um as f32);
+        let max_search_radius_vox = sim.simulation.segment_length_voxels as f32 * 4.0;
         let owner_type_mask = packet.type_idx as u8;
 
         let mut current_pos = Vec3::new(
@@ -516,20 +526,6 @@ pub fn inject_ghost_axons(
     }
 
     (grown, outgoing)
-}
-
-fn find_layer(z: u32, ranges: &[LayerZRange]) -> Option<&LayerZRange> {
-    ranges
-        .iter()
-        .find(|l| z >= l.z_start_vox && z < l.z_end_vox)
-}
-
-fn find_target_layer(soma_z: u32, ranges: &[LayerZRange]) -> Option<&LayerZRange> {
-    // Следующий слой выше по Z (z_start больше z текущего слоя)
-    ranges
-        .iter()
-        .filter(|l| l.z_start_vox > soma_z)
-        .min_by_key(|l| l.z_start_vox)
 }
 
 

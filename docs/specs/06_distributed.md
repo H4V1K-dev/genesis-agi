@@ -416,18 +416,22 @@ pub struct BspBarrier {
 | [02_configuration.md](./02_configuration.md) | §5.3: master_seed, deterministic topology |
 | [project_structure.md](../project_structure.md) | Distributed arch role in overall Genesis design |
 
+## 6. [TODO] Autonomous Node Recovery (Fault Tolerance)
+
+**Goal**: Ensure high availability and fault tolerance for the distributed simulation network.
+
+### Proposed Architecture
+- **State Replication**: Each node will maintain redundant backups of its VRAM state / graph topology checkpoints in multiple distinct storage locations.
+- **Heartbeat & Consensus**: Implement a network-wide gossip or heartbeat protocol so that all nodes constantly monitor the health and responsiveness of their peers.
+- **Self-Healing (Autonomous Orchestration)**: If a node failure is detected, the network will automatically identify available free hardware, deploy a new genesis-runtime instance, restore from the latest distributed backup, and dynamically re-route intra-gpu/network channels to seamlessly patch the gap without human intervention.
+
 ---
 
 ## Changelog
 
 | Дата | Версия | Описание изменений |
 |---|---|---|
+| 2026-03-02 | 1.2 | Добавлено требование по Autonomous Node Recovery (Fault Tolerance) |
 | 2026-02-28 | 1.1 | Разделение на [MVP] vs [PLANNED] маркеры. Уточнение GhostConnection (V1 реальность). Обновлены SpikeEvent, BspBarrier, GhostConnection структуры согласно реальному коду. Добавлен раздел "Текущая реализация в V1" и таблица функций. |
 | TBD | 1.0 | Первая версия спеки |
-
-### 3.4. Результат: Zero-Cost Routing
-
-1. **Передающий шард (V1):** Создаётся выходной порт (`Port Out`).
-2. **Принимающий шард (V2):** Создаётся массив Ghost Axons в рассчитанных координатах (`Target_X`, `Target_Y`). Они начинают **локально прорастать** вглубь целевого слоя, подчиняясь обычной физике Cone Tracing (§4 из [04_connectivity.md](./04_connectivity.md)).
-3. **Задержка:** `Delay_Ticks` рассчитывается жёстко по физическому расстоянию между зонами в Атласе. Реальный сетевой лаг (пинг) **прячется** внутри этой математической задержки — сеть перестаёт быть проблемой.
 

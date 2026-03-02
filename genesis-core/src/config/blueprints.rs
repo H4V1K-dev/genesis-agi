@@ -156,8 +156,10 @@ impl BlueprintsConfig {
 
 /// Параметры физики и пластичности для одного типа нейрона (Variant).
 /// Выровнено ровно до 64 байт для идеального кэширования в L1 Constant Memory GPU.
+use serde::Serialize;
+
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct VariantParameters {
     // ==========================================
     // 1. Potentials & Homeostasis (4-byte alignment)

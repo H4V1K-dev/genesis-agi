@@ -1,6 +1,0 @@
-[[output]]
-name = "motor_actuators"
-source_layer = "L5_6"
-width = 16  # 16 muscles (8 flexors + 8 extensors)
-height = 16 # 16 neurons per muscle population
-type_mask = 0x22

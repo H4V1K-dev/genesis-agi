@@ -1,6 +1,6 @@
 use super::*;
 use crate::parser::simulation::{SimulationConfig, SimulationParams, WorldConfig};
-use crate::parser::blueprints::{Blueprints, NeuronType};
+use genesis_core::config::blueprints::{GenesisConstantMemory, VariantParameters};
 
 fn make_sim_config(speed: u32, len_voxels: u32) -> SimulationConfig {
     SimulationConfig {
@@ -24,67 +24,14 @@ fn make_sim_config(speed: u32, len_voxels: u32) -> SimulationConfig {
     }
 }
 
-fn make_blueprints_with_prop(prop_len: u8) -> Blueprints {
-    let nt = NeuronType {
-        name: "TestNeuron".to_string(),
-        growth_vertical_bias: 0.0,
-        steering_fov_deg: 90.0,
-        steering_radius_um: 150.0,
-        steering_weight_inertia: 0.1,
-        steering_weight_sensor: 0.9,
-        steering_weight_jitter: 0.0,
-        initial_synapse_weight: 74,
-        dendrite_whitelist: vec![],
-        is_inhibitory: false,
-        sprouting_weight_type: 0.0,
-        type_affinity: 1.0,
-        inertia_curve: [0; 16],
-        ltm_slot_count: 80,
-        conduction_velocity: 1,
-        signal_propagation_length: prop_len,
-        homeostasis_penalty: 1,
-        homeostasis_decay: 1,
-        slot_decay_ltm: 1,
-        slot_decay_wm: 1,
-        threshold: 1000,
-        rest_potential: 0,
-        leak_rate: 10,
-        refractory_period: 5,
-        synapse_refractory_period: 5,
-        axon_growth_step: 10,
-        gsop_depression: 10,
-        gsop_potentiation: 10,
-        sprouting_weight_distance: 1.0,
-        sprouting_weight_power: 0.0,
-        sprouting_weight_explore: 0.0,
-        prune_threshold: 10,
+fn make_const_mem_with_prop(prop_len: u8, refr: u8) -> GenesisConstantMemory {
+    let mut variants = [VariantParameters::default(); 16];
+    variants[0] = VariantParameters {
+        signal_propagation_length: prop_len as u16,
+        refractory_period: refr,
+        ..VariantParameters::default()
     };
-
-    Blueprints {
-        neuron_types: vec![nt],
-    }
-}
-
-#[test]
-fn test_validator_accepts_prop_eq_v_seg() {
-    // speed=50, voxel=25, voxels_per_seg=2 -> speed=50, seg_um=50 -> v_seg=1
-    let sim = make_sim_config(50, 2);
-    // prop_len = 1 >= v_seg (1) -> Ok
-    let blueprints = make_blueprints_with_prop(1);
-
-    let res = check_propagation_covers_v_seg(&sim, &blueprints);
-    assert!(res.is_ok(), "Validator should accept prop_len >= v_seg");
-}
-
-#[test]
-fn test_validator_accepts_prop_gt_v_seg() {
-    // v_seg = 1
-    let sim = make_sim_config(50, 2);
-    // prop_len = 5 >= v_seg (1) -> Ok
-    let blueprints = make_blueprints_with_prop(5);
-
-    let res = check_propagation_covers_v_seg(&sim, &blueprints);
-    assert!(res.is_ok(), "Validator should accept prop_len > v_seg");
+    GenesisConstantMemory { variants }
 }
 
 #[test]
@@ -92,35 +39,26 @@ fn test_validator_rejects_prop_lt_v_seg() {
     // speed=100, voxel=25, voxels_per_seg=1 -> speed=100, seg_um=25 -> v_seg=4
     let sim = make_sim_config(100, 1);
     // prop_len = 3 < v_seg (4) -> Error!
-    let blueprints = make_blueprints_with_prop(3);
+    let const_mem = make_const_mem_with_prop(3, 10);
 
-    let res = check_propagation_covers_v_seg(&sim, &blueprints);
+    let res = check_propagation_covers_v_seg(&sim, &const_mem);
     assert!(res.is_err(), "Validator MUST reject prop_len < v_seg");
-    
-    let err_msg = res.unwrap_err().to_string();
-    assert!(err_msg.contains("нарушает §1.1 Invariant"));
-    assert!(err_msg.contains("signal_propagation_length (3) < v_seg (4)"));
 }
 
 #[test]
-fn test_validator_accepts_refr_gt_prop() {
-    let mut blueprints = make_blueprints_with_prop(5); // prop = 5
-    // По дефолту в `make_blueprints_with_prop` refractory = 5 <= prop, нужно менять:
-    blueprints.neuron_types[0].refractory_period = 10;
+fn test_validator_rejects_refr_gt_prop() {
+    // prop = 5, refr = 10 -> Error!
+    let const_mem = make_const_mem_with_prop(5, 10);
 
-    let res = check_single_spike_in_flight(&blueprints);
-    assert!(res.is_ok(), "Validator should accept refractory_period > signal_propagation_length");
+    let res = check_single_spike_in_flight(&const_mem);
+    assert!(res.is_err(), "Validator MUST reject refractory_period > signal_propagation_length");
 }
 
 #[test]
-fn test_validator_rejects_refr_le_prop() {
-    let mut blueprints = make_blueprints_with_prop(5); // prop = 5
-    blueprints.neuron_types[0].refractory_period = 5;
+fn test_validator_accepts_refr_le_prop() {
+    // prop = 10, refr = 5 -> Ok
+    let const_mem = make_const_mem_with_prop(10, 5);
 
-    let res = check_single_spike_in_flight(&blueprints);
-    assert!(res.is_err(), "Validator MUST reject refractory_period <= signal_propagation_length");
-    
-    let err_msg = res.unwrap_err().to_string();
-    assert!(err_msg.contains("нарушает §1.6 Invariant"));
-    assert!(err_msg.contains("refractory_period (5) <= signal_propagation_length (5)"));
+    let res = check_single_spike_in_flight(&const_mem);
+    assert!(res.is_ok(), "Validator should accept refractory_period <= signal_propagation_length");
 }

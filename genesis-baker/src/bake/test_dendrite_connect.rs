@@ -1,11 +1,12 @@
 #[cfg(test)]
 mod tests {
     use crate::bake::axon_growth::{GrownAxon, LayerZRange, ShardBounds, grow_axons};
+    use crate::bake::spatial_grid::SpatialGrid;
     use crate::bake::dendrite_connect::connect_dendrites;
     use crate::bake::layout::ShardSoA;
     use crate::bake::neuron_placement::PlacedNeuron;
     use crate::parser::simulation::{SimulationConfig, SimulationParams, WorldConfig};
-    use genesis_core::config::blueprints::{GenesisConstantMemory, VariantParameters};
+    use genesis_core::config::blueprints::{GenesisConstantMemory, VariantParameters, NeuronType};
     use genesis_core::coords::{pack_position, unpack_target};
 
     fn make_sim_config(w: u32, d: u32, h: u32) -> SimulationConfig {
@@ -66,6 +67,26 @@ mod tests {
         GenesisConstantMemory { variants }
     }
 
+    fn make_types() -> Vec<NeuronType> {
+        let mut types = vec![];
+        for i in 0..2 {
+            types.push(NeuronType {
+                name: format!("Type_{}", i),
+                is_inhibitory: i == 1,
+                growth_vertical_bias: 0.5,
+                steering_fov_deg: 90.0,
+                steering_radius_um: 150.0,
+                steering_weight_inertia: 0.5,
+                steering_weight_sensor: 0.5,
+                steering_weight_jitter: 0.0,
+                signal_propagation_length: 5,
+                conduction_velocity: 1,
+                ..NeuronType::default()
+            });
+        }
+        types
+    }
+
     fn make_axon(soma_idx: usize, type_idx: usize, segments: Vec<u32>) -> GrownAxon {
         let last = *segments.last().unwrap_or(&0);
         let tip_z = (last >> 20) & 0xFF;
@@ -79,6 +100,7 @@ mod tests {
             tip_z,
             length_segments: segments.len() as u32,
             segments,
+            last_dir: glam::Vec3::Z,
         }
     }
 
@@ -102,7 +124,7 @@ mod tests {
         ]);
 
         let mut shard = ShardSoA::new(2, 1);
-        connect_dendrites(&mut shard, &neurons, &[a_ax], &const_mem, 42);
+        connect_dendrites(&mut shard, &neurons, &[a_ax], &const_mem, 42, 30);
 
         let p_n = shard.padded_n;
         let mut b_connected = false;
@@ -142,7 +164,7 @@ mod tests {
         ]);
 
         let mut shard = ShardSoA::new(2, 1);
-        connect_dendrites(&mut shard, &neurons, &[a_ax], &const_mem, 42);
+        connect_dendrites(&mut shard, &neurons, &[a_ax], &const_mem, 42, 30);
 
         let mut connections_count = 0;
         let p_n = shard.padded_n;
@@ -160,10 +182,10 @@ mod tests {
         let const_mem = make_const_mem();
 
         let mut ax_i = make_axon(1, 1, vec![pack_seg(0, 0, 0, 1), pack_seg(10, 10, 0, 1)]);
-        ax_i.soma_idx = 1;
-
+        let max_search_radius_vox = 10.0;
+        let spatial_grid = SpatialGrid::new(&neurons, max_search_radius_vox);
         let mut shard = ShardSoA::new(1, 2);
-        connect_dendrites(&mut shard, &neurons, &[ax_i], &const_mem, 42);
+        connect_dendrites(&mut shard, &neurons, &[ax_i], &const_mem, 42, 30);
 
         let p_n = shard.padded_n;
         let w = shard.dendrite_weights[0 * p_n + 0];
@@ -177,7 +199,7 @@ mod tests {
         let ax = make_axon(1, 0, vec![pack_seg(100, 100, 100, 0)]);
 
         let mut shard = ShardSoA::new(1, 2);
-        connect_dendrites(&mut shard, &neurons, &[ax], &const_mem, 42);
+        connect_dendrites(&mut shard, &neurons, &[ax], &const_mem, 42, 30);
 
         let p_n = shard.padded_n;
         for slot in 0..genesis_core::constants::MAX_DENDRITE_SLOTS {
@@ -195,7 +217,7 @@ mod tests {
         let ax3 = make_axon(3, 0, vec![pack_seg(0, 0, 0, 0), pack_seg(5, 10, 0, 0)]);
 
         let mut shard = ShardSoA::new(1, 4);
-        connect_dendrites(&mut shard, &neurons, &[ax1, ax2, ax3], &const_mem, 42);
+        connect_dendrites(&mut shard, &neurons, &[ax1, ax2, ax3], &const_mem, 42, 30);
 
         let p_n = shard.padded_n;
         let (t0, _) = unpack_target(shard.dendrite_targets[0 * p_n + 0]).unwrap_or((999, 999));
@@ -211,7 +233,7 @@ mod tests {
     fn test_empty_world() {
         let const_mem = make_const_mem();
         let mut shard = ShardSoA::new(0, 0);
-        connect_dendrites(&mut shard, &[], &[], &const_mem, 42);
+        connect_dendrites(&mut shard, &[], &[], &const_mem, 42, 30);
         // Should not panic
     }
 
@@ -237,10 +259,11 @@ mod tests {
             neurons.push(make_neuron(x, y, 5, t));
         }
 
-        let (axons, _ghosts) = grow_axons(&neurons, &layers, &const_mem, &sim, &bounds, 42);
+        let types = make_types();
+        let (axons, _ghosts) = grow_axons(&neurons, &layers, &types, &sim, &bounds, 42);
 
         let mut shard = ShardSoA::new(neurons.len(), axons.len());
-        connect_dendrites(&mut shard, &neurons, &axons, &const_mem, 42);
+        connect_dendrites(&mut shard, &neurons, &axons, &const_mem, 42, 30);
 
         let p_n = shard.padded_n;
         let mut conn_count = 0;

@@ -1,0 +1,22 @@
+[simulation]
+config = "config/simulation.toml"
+
+[[zone]]
+name = "SensoryCortex"
+blueprints = "config/brains/PingPongBrain/blueprints.toml"
+anatomy = "config/brains/PingPongBrain/SensoryCortex/anatomy.toml"
+io = "config/brains/PingPongBrain/SensoryCortex/io.toml"
+baked_dir = "baked/PingPongBrain/SensoryCortex"
+
+[[zone]]
+name = "MotorCortex"
+blueprints = "config/brains/PingPongBrain/blueprints.toml"
+anatomy = "config/brains/PingPongBrain/MotorCortex/anatomy.toml"
+io = "config/brains/PingPongBrain/MotorCortex/io.toml"
+baked_dir = "baked/PingPongBrain/MotorCortex"
+
+[[connection]]
+from = "SensoryCortex"
+to = "MotorCortex"
+width = 16
+height = 16
