@@ -28,7 +28,7 @@ struct SoA_State {
   uint32_t *telemetry_spikes;
 };
 
-// Строго 64 байта. 16 типов = 1024 байта (идеально ложится в кеш L1 constant)
+// Строго 128 байт. 16 типов = 2048 байт (влезает в constant memory)
 struct VariantParameters {
   int32_t threshold;
   int32_t rest_potential;
@@ -42,7 +42,10 @@ struct VariantParameters {
   uint8_t slot_decay_ltm;
   uint8_t slot_decay_wm;
   uint8_t signal_propagation_length;
-  uint8_t _padding[31]; // Дополняем до 64 байт
+  uint8_t ltm_slot_count;
+  uint8_t _pad1[2];          // Выравнивание до 36B
+  int16_t inertia_curve[16]; // 32B — кривая инерции GSOP
+  uint8_t _pad2[60];         // Дополняем до 128 байт
 };
 }
 
@@ -646,6 +649,7 @@ struct ShardVramPtrs {
   uint32_t *soma_to_axon;
   uint32_t *dendrite_targets;
   int16_t *dendrite_weights;
+  uint8_t *dendrite_timers;
   uint32_t *axon_heads; // отдельный буфер
 };
 
@@ -666,9 +670,10 @@ int32_t cu_allocate_shard(uint32_t padded_n, uint32_t total_axons,
   size_t sz_s2a = (size_t)padded_n * sizeof(uint32_t);
   size_t sz_targets = (size_t)padded_n * MAX_DENDRITES_SV * sizeof(uint32_t);
   size_t sz_weights = (size_t)padded_n * MAX_DENDRITES_SV * sizeof(int16_t);
+  size_t sz_dtimers = (size_t)padded_n * MAX_DENDRITES_SV * sizeof(uint8_t);
 
   size_t total_state = sz_voltage + sz_flags + sz_thresh + sz_timers + sz_s2a +
-                       sz_targets + sz_weights;
+                       sz_targets + sz_weights + sz_dtimers;
 
   // Единый Flat Allocation для всех полей сом + дендритов
   void *base = nullptr;
@@ -697,6 +702,8 @@ int32_t cu_allocate_shard(uint32_t padded_n, uint32_t total_axons,
   out_vram->dendrite_targets = (uint32_t *)((char *)base + off);
   off += sz_targets;
   out_vram->dendrite_weights = (int16_t *)((char *)base + off);
+  off += sz_weights;
+  out_vram->dendrite_timers = (uint8_t *)((char *)base + off);
 
   // Аксоны — отдельная аллокация (total_axons ≠ padded_n)
   err = cudaMalloc((void **)&out_vram->axon_heads,
@@ -766,6 +773,7 @@ void cu_free_shard(ShardVramPtrs *vram) {
     vram->soma_to_axon = nullptr;
     vram->dendrite_targets = nullptr;
     vram->dendrite_weights = nullptr;
+    vram->dendrite_timers = nullptr;
   }
   if (vram->axon_heads) {
     cudaFree((void *)vram->axon_heads);

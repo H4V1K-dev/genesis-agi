@@ -124,33 +124,7 @@ pixel_id = matrix_offset + y * W + x
 
 Установка бита = сброс `axon_heads[virtual_offset + pixel_id] = 0` (рождение сигнала). Далее всё по штатной физике — сигнал распространяется, дендриты реагируют, GSOP обучает.
 
-### 2.6. Глубина батча и Stride
-
-Батч = `sync_batch_ticks` тиков. Параметр `stride` определяет частоту инъекции:
-
-```
-stride = 0   → тик 0 только (Снимок, Single-Tick Pulse)
-stride = 1   → каждый тик (Поток)
-stride = 2   → каждый 2-й тик
-stride = N   → каждый N-й тик
-```
-
-**Размер батча и инъекций:**
-
-При `stride = S`, ядро `InjectInputs` проверяет `if (tick % S == 0) inject()`. Эффективное количество инъекций в батче:
-$$\text{effective\_ticks} = \lceil \text{sync\_batch\_ticks} / S \rceil$$
-
-Размер `input_bitmask_buffer`:
-$$\text{size} = \lceil \text{total\_virtual\_axons} / 32 \rceil \times 4 \times \text{effective\_ticks}$$
-
-**Примеры:**
-- `stride = 0, sync_batch_ticks = 100`: 1 инъекция (snapshot), buffer = `N/32 × 4 × 1` байт
-- `stride = 1, sync_batch_ticks = 100`: 100 инъекций (stream), buffer = `N/32 × 4 × 100` байт
-- `stride = 2, sync_batch_ticks = 100`: 50 инъекций, buffer = `N/32 × 4 × 50` байт
-
-Нулевая маска = ноль работы (Early Exit).
-
-### 2.7. UDP Протокол (External I/O Communication)
+### 2.6. Bulk DMA & Stride (Autonomous Batch Execution)\n\n**Bulk DMA Архитектура (см. [06_distributed.md §2.9](./06_distributed.md)):**\n\nВходная маска **не потокируется** каждый тик. **Весь батч** загружается в VRAM **одной асинхронной операцией** `cudaMemcpyAsync` перед началом вычислений (<1 мс на PCIe 4.0 x16). GPU крутит **6-ядерный Autonomous Loop** полностью независимо от хоста, используя смещённые указатели (`tick_input_ptr`) внутри батча за **O(1)** без обращения к хосту или выхода из цикла.\n\n**Stride Parameter (Intra-Batch Frequency):**\n\nПараметр `stride` определяет частоту обновления входа в батче:\n\n```\nstride = 0   → тик 0 только (Снимок, Single-Tick Pulse)\nstride = 1   → каждый тик (Поток)\nstride = 2   → каждый 2-й тик\nstride = N   → каждый N-й тик\n```\n\nПри `stride = S`, ядро `InjectInputs` получает смещённый указатель на маску каждый S-й тик. Эффективное количество инъекций в батче:\n$$\\text{effective\\_ticks} = \\lceil \\text{sync\\_batch\\_ticks} / S \\rceil$$\n\nРазмер `input_bitmask_buffer`:\n$$\\text{size} = \\lceil \\text{total\\_virtual\\_axons} / 32 \\rceil \\times 4 \\times \\text{effective\\_ticks}$$\n\n**Примеры:**\n- `stride = 0, sync_batch_ticks = 100`: 1 снимок (t=0), buffer = `N/32 × 4 × 1` байт — вход **замораживается** на весь батч\n- `stride = 1, sync_batch_ticks = 100`: 100 инъекций (поток), buffer = `N/32 × 4 × 100` байт — sensor data каждый тик\n- `stride = 2, sync_batch_ticks = 100`: 50 инъекций, buffer = `N/32 × 4 × 50` байт — downsampling каждый 2-й тик\n\n**Early Exit:** Нулевая маска на тике → `InjectInputs` пропускает все 128 потоков варпа. Ноль FLOPS. Ноль работы.\n\n**Инвариант Bulk:** Четыре DMA за батч (100 ms): H2D input, H2D schedule, D2H output, D2H activity. Ноль микротранзакций в горячем цикле. Хост полностью деспотичен.\n\n### 2.7. UDP Протокол (External I/O Communication)
 
 Хост **пакует** весь батч целиком: `Input_Bitmask[effective_ticks × total_words]`. Runtime получает батч по UDP.
 

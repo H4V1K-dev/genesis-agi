@@ -21,7 +21,7 @@ pub struct ShardSoA {
     // Транспонированная матрица дендритов (Columnar Layout)
     pub dendrite_targets: Vec<u32>,
     pub dendrite_weights: Vec<i16>,
-    pub dendrite_timers: Vec<u8>, // Transient: stored in baker but NOT in .state
+    pub dendrite_timers: Vec<u8>, // Refractory timers for synapses
 
     // Аксоны
     pub axon_heads: Vec<u32>,
@@ -30,6 +30,9 @@ pub struct ShardSoA {
 
     // Маппинг: soma_idx → axon_idx
     pub soma_to_axon: Vec<u32>,
+
+    /// Упакованные позиции сом (u32: 11-бит X, 11-бит Y, 6-бит Z, 4-бит Type)
+    pub soma_positions: Vec<u32>,
 }
 
 impl ShardSoA {
@@ -57,6 +60,7 @@ impl ShardSoA {
             axon_dirs_xyz: vec![0; total_axons],
 
             soma_to_axon: vec![u32::MAX; padded_n],
+            soma_positions: vec![0; padded_n],
         }
     }
 
@@ -75,6 +79,7 @@ impl ShardSoA {
         let state_path = out_dir.join("shard.state");
         let axons_path = out_dir.join("shard.axons");
         let geom_path = out_dir.join("shard.geom");
+        let pos_path = out_dir.join("shard.pos");
 
         // 1. .state (Somas + Dendrites)
         write_state_blob(
@@ -87,6 +92,7 @@ impl ShardSoA {
             &self.soma_to_axon,
             &self.dendrite_targets,
             &self.dendrite_weights,
+            &self.dendrite_timers,
         ).expect("Failed to write .state blob");
 
         // 2. .axons (Heads only)
@@ -97,6 +103,10 @@ impl ShardSoA {
         let mut geom_file = File::create(geom_path).expect("Failed to create .geom file");
         geom_file.write_all(cast_slice(&self.axon_tips_uvw)).unwrap();
         geom_file.write_all(cast_slice(&self.axon_dirs_xyz)).unwrap();
+
+        // 4. .pos (Packed soma positions u32: Type|Z|Y|X)
+        let mut pos_file = File::create(pos_path).expect("Failed to create .pos file");
+        pos_file.write_all(cast_slice(&self.soma_positions)).unwrap();
     }
 }
 
@@ -112,6 +122,7 @@ pub fn write_state_blob(
     soma_to_axon: &[u32],
     dendrite_targets: &[u32], // Длина: padded_n * 128
     dendrite_weights: &[i16], // Длина: padded_n * 128
+    dendrite_timers: &[u8],  // Длина: padded_n * 128
 ) -> std::io::Result<()> {
     let (_, total_size) = calculate_state_blob_size(padded_n);
     
@@ -126,6 +137,7 @@ pub fn write_state_blob(
     blob.extend_from_slice(cast_slice(&soma_to_axon[..padded_n]));
     blob.extend_from_slice(cast_slice(&dendrite_targets[..padded_n * MAX_DENDRITES]));
     blob.extend_from_slice(cast_slice(&dendrite_weights[..padded_n * MAX_DENDRITES]));
+    blob.extend_from_slice(cast_slice(&dendrite_timers[..padded_n * MAX_DENDRITES]));
 
     assert_eq!(blob.len(), total_size, "FATAL: State blob size mismatch before disk flush");
 

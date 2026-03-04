@@ -137,75 +137,32 @@ __global__ void apply_spike_batch_kernel(u32 num_spikes,
 
 **Constant Memory:** `GenesisConstantMemory` (см. [07_gpu_runtime.md §1.5](./07_gpu_runtime.md)). Содержит array из 16 `VariantParameters` structs (по одному на каждый тип нейрона из blueprints). Variant ID распаковывается из флагов как `(flags >> 4) & 0xF` (биты 4-7 = 16 типов).
 
-### 1.3. Инференс: Пластичность (ApplyGSOP)
+### 1.3. Инференс: Пространственный GSOP (ApplyGSOP)
 
-**Kernel ApplyGSOP (100% Integer, 0% Float, Branchless):**
+Ядро пластичности полностью лишено временных меток и буферов истории. Обучение триггерится **только** в момент генерации спайка сомой.
 
-```cuda
-__global__ void apply_gsop_kernel(uint32_t padded_n,
-                                  const uint8_t *__restrict__ flags,
-                                  const uint32_t *__restrict__ dendrite_targets,
-                                  int16_t *dendrite_weights,
-                                  uint8_t *dendrite_timers) {
-    u32 tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= padded_n) return;
+**Механика Active Tail Check:**
 
-    // 1. Early Exit: 99.9% потоков уходят здесь (спайк ~1-10 Hz)
-    u8 f = flags[tid];
-    if (!(f & 0x1)) return;
+Причинно-следственная связь доказывается пространственным пересечением в текущем тике.
 
-    // 2. Загрузка параметров через struct (L1 Cache, 1 такт)
-    u8 type_mask = f >> 4;
-    u8 variant = type_mask & 0xF;   // Биты 4-7 = Variant (16 типов)
-    VariantParameters p = const_mem.variants[variant];
+1. **Сома генерирует спайк** (`is_spiking == true`).
+2. **Ядро проверяет каждый дендрит:** касается ли он «активного хвоста» (Active Tail) внутри аксона-источника.
+   - Active Tail = сегменты индекса `i`, для которых `(Head - Tail_Length) <= i <= Head`
+   - Проверка: `dist = head - seg_idx < propagation_length`
+3. **Potentiation (Усиление):** Если хвост касается дендрита — сигнал физически пришёл в текущем тике, причинность доказана, вес **увеличивается**.
+4. **Depression (Ослабление):** Если хвоста нет — аксон молчал в момент спайка сомы, вес **уменьшается**.
 
-    // 3. Columnar Loop: 128 слотов (Coalesced Access)
-    #pragma unroll
-    for (int slot = 0; slot < 128; ++slot) {
-        u32 col_idx = slot * N + tid;
+**Инвариант:** Никаких глобальных массивов `last_spike_time[нейроны]` или `spike_history_ring[тики][спайки]`. Ноль дополнительной памяти. Ноль кэш-промахов из-за несуществующих буферов.
 
-        u32 target_packed = dendrite_target[col_idx];
-        if (target_packed == 0) break; // Columnar Defrag invariant: first empty = all empty
+### 1.4. Zero-Cost Оптимизации
 
-        // 4. Causal Check: Timer-as-Contact-Flag
-        // UpdateNeurons (Step 4) уже записал результат в dendrite_timers:
-        //   timer == synapse_refractory → контакт был в этом тике (Potentiation)
-        //   timer == 0                  → контакта не было (Depression)
-        // Никаких повторных чтений axon_heads. Нет race condition.
-        u8 d_timer = dendrite_timers[col_idx];
-        u32 is_causal = (d_timer == p.synapse_refractory);
+| Паттерн | Реализация | Эффект |
+| :--- | :--- | :--- |
+| **Early Exit** | Если сома не спайкует (`is_spiking == 0`), поток варпа мгновенно завершает работу (`return`). | В ~99% тиков GSOP не выполняет ни одной математической операции и не трогает шину памяти. |
+| **Branchless Math** | Вычисление `is_active` через целочисленную дистанцию `head - seg_idx < propagation_length`. Нет условных переходов — только ALU. | Нет дивергенции варпов (Warp Divergence). Все 32 потока в варпе выполняют один путь. |
+| **Integer Physics** | Веса хранятся как `i16`, изменения применяются через целочисленное сложение/вычитание с saturate clamp `±32767`. | 0% Float операций. Максимальная плотность целочисленных ALU. Нет FPU конвейеров — ALU выполняют всю работу. |
 
-        // 5. Inertia Rank: abs(weight) >> 11 → 16 рангов (по 2048 единиц)
-        i16 w = dendrite_weights[col_idx];
-        u16 abs_w = (u16)abs(w);
-        u8 inertia = p.inertia_curve[abs_w >> 11];
-
-        // 6. Branchless GSOP Math (Zero Float)
-        u16 delta_pot = (p.gsop_potentiation * inertia) >> 7;
-        u16 delta_dep = (p.gsop_depression * inertia) >> 7;
-        i32 delta = is_causal * delta_pot - (!is_causal) * delta_dep;
-
-        // 7. Slot Decay: LTM/WM множители из конфига (Fixed-point: 128 = 1.0×)
-        u8 decay = (slot < p.ltm_slot_count) ? p.slot_decay_ltm : p.slot_decay_wm;
-        delta = (delta * decay) >> 7;
-
-        // 8. Signed Clamp ±32767 (Branchless sign extraction)
-        i32 w_sign = ((i32)w >> 31) | 1;    // +1 or -1
-        i32 new_abs = (i32)abs_w + delta;
-        dendrite_weights[col_idx] = (i16)(w_sign * max(0, min(32767, new_abs)));
-    }
-}
-```
-
-**Pruning:** Если `abs(Weight) < Prune_Threshold` после обновления, слот помечается как свободный (`target_packed = 0`) для Sprouting в фазу «Ночь».
-
-### 1.4. Почему это эффективно
-
-| Принцип | Эффект |
-|---|---|
-| **Memory Bandwidth** | Чтение состояния чужих аксонов только когда рефрактерность закончилась. В ~90% тиков дендрит «спит» — шина не нагружается. |
-| **No History Buffers** | Не храним `last_spike_time` для миллиардов синапсов. Экономия ~4–8 ГБ VRAM. |
-| **Warp Divergence** | Все ветки `if/else` минимизированы. GSOP (самая ветвистая часть) выполняется редко — только при спайке сомы. |
+**Результат:** Kernel ApplyGSOP при спайке — это одна загрузка флага, одна проверка бита, затем цикл по 128 слотам с целочисленными чтениями и сложениями. Никакие деревья, никакие приоритетные очереди, никакие кольцевые буферы. Чистая Data-Oriented Design.
 
 ### 1.5. Главный Тик: UpdateNeurons (GLIF Kernel)
 
@@ -342,6 +299,38 @@ __global__ void propagate_axons_kernel(u32 total_axons, u32* axon_heads, u32 v_s
   - Сетевой спайк: `ApplySpikeBatch` (Ghost аксоны)
   - Внешний стимул: `InjectInputs` (виртуальные аксоны)
 - **1 спайк в полёте:** `signal_propagation_length < soma_refractory_period` → первый поезд успевает доехать до конца до рождения второго.
+
+---
+
+### 1.6. Безопасность Сигналов при Обслуживании (Sentinel Refresh Safety)
+
+Фаза «Ночь» и регламентные очистки **никогда не прерывают активные сигналы**, циркулирующие в сети.
+
+#### 1.6.1. Механика защиты SENTINEL_DANGER_THRESHOLD
+
+При обслуживании массива `axon_heads` применяется фильтр, предотвращающий стирание активных сигналов:
+
+* **Фильтр Сохранения:** Если значение `axon_heads[id]` меньше порога `SENTINEL_DANGER_THRESHOLD` (например, `0x70000000`), это означает, что спайк произошёл недавно и сигнал физически находится внутри проводящей части аксона (Active Tail). Такое значение **не изменяется**.
+
+* **Инвариант Причинности:** Только "давно остывшие" аксоны, чьи головы превысили порог, могут быть безопасно возвращены в `AXON_SENTINEL` для предотвращения целочисленного переполнения `u32` [1, 4].
+
+* **Результат:** Краткосрочная память (Active Tails) и текущий контекст распространения сигналов бесшумно переживают фазу Maintenance, не требуя синхронизации с GPU-циклом.
+
+**Пример:**
+```cpp
+#define SENTINEL_DANGER_THRESHOLD 0x70000000u
+
+void refresh_axon_sentinels(u32* axon_heads, u32 count) {
+    for (u32 i = 0; i < count; ++i) {
+        u32 head = axon_heads[i];
+        // Только холодные аксоны могут быть обнулены
+        if (head > SENTINEL_DANGER_THRESHOLD) {
+            axon_heads[i] = AXON_SENTINEL;
+        }
+        // Активные сигналы (head <= threshold) остаются нетронутыми
+    }
+}
+```
 
 ---
 

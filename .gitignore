@@ -39,8 +39,9 @@ Thumbs.db
 
 # Папки
 __pycache__/
-SUMARIZER/
 tests/tmp/
+SUMARIZER/
+PERSONAL/
 _agents/
 .agents/
 _agent/

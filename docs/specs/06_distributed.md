@@ -224,19 +224,57 @@ for event in incoming_batch {
 
 **Чтение (Day Phase, GPU):** На каждом тике `ApplySpikeBatch` читает **один слот** `schedule[current_tick_in_batch]`, запускается только для `counts[tick]` спайков.
 
-### 2.9. Ping-Pong Double Buffering [MVP]
+### 2.9. Bulk DMA & Autonomous Batch Execution [MVP]
 
-Чтобы GPU не простаивала на сетевом барьере:
+Сетевой реактор Tokio и GPU полностью изолированы через Ping-Pong буферы (`BspBarrier`). Шина PCIe не дергается каждый тик.
 
-```
-Buffer_A ←──── GPU считает Batch N (читает schedule из A)
-Buffer_B ←──── Сеть заполняет Batch N+1 (спайки от соседей пишутся в B)
+**Стратегия: Минимум пересечений Host-Device**
 
-[BARRIER] ───→ swap(A, B) ───→ GPU считает Batch N+1 из B
-```
+1. **Bulk H2D (Host-to-Device):**
+   Перед началом батча `Input_Bitmask` и `SpikeSchedule` заливаются в VRAM за **одну** асинхронную транзакцию `cudaMemcpyAsync`. 
+   - Размер: `(input_bitmask_size + schedule_size)` байт
+   - Ожидание: <1 мс на PCIe 4.0 x16 при ≈100 МБ батча
+   - Запуск: `cudaMemcpyAsync(d_input, h_input, size, 0, stream)` с non-blocking флагом
 
-- GPU и NIC работают **параллельно** — GPU не ждёт сеть, пока считает текущий батч.
-- На барьере ожидаем только «хвосты» (последние пакеты) и меняем указатели.
+2. **Autonomous GPU Loop:**
+   GPU крутит **6-ядерный цикл** (`sync_batch_ticks` шагов) полностью независимо от хоста:
+   ```
+   for tick_in_batch in 0..sync_batch_ticks:
+       InjectInputs        (Virtual Axon pulse)
+       ApplySpikeBatch     (Ghost Axon activation)
+       PropagateAxons      (Безусловный IADD на все аксоны)
+       UpdateNeurons       (GLIF + spike check)
+       ApplyGSOP           (Plasticity)
+       RecordReadout       (Output snapshot)
+   ```
+   - **Ни одного вызова `cudaDeviceSynchronize()`** внутри цикла
+   - Ни одного обращения к хосту
+   - **Результат:** Полная утилизация GPU SM, без простоев
+
+3. **Pointer Offsetting (O(1)):**
+   Внутри горячего цикла CUDA ядра получают смещенные указатели на данные текущего тика:
+   ```cuda
+   __global__ void PropagateAxons(...) {
+       int tid = blockIdx.x * blockDim.x + threadIdx.x;
+       if (tid >= total_axons) return;
+       
+       // tick_input_ptr = base_ptr + (tick_in_batch * stride)
+       // O(1) арифметика, никакого поиска
+       uint32_t *tick_schedule = schedule_base + (tick_in_batch * max_spikes_per_tick);
+       int head = axon_heads[tid];
+       axon_heads[tid] = head + v_seg[tid];  // Propagate
+   }
+   ```
+
+4. **Bulk D2H (Device-to-Host):**
+   По окончании батча — одна асинхронная транзакция:
+   ```cuda
+   cudaMemcpyAsync(h_output, d_output_history, output_size, cudaMemcpyDeviceToHost, stream);
+   ```
+   - Перекрытие: пока host обрабатывает батч N, GPU готовит батч N+1
+   - Network Phase парирует это естественно через BSP barrier
+
+**Инвариант:** Нет микротранзакций. Нет пинг-понга каждый тик. Только 4 макро-операции за весь батч (100 ms → 4 DMA).
 
 ### 2.10. Почему Это Сработает [MVP]
 

@@ -9,7 +9,6 @@ use crate::network::io_server::ExternalIoServer;
 use crate::network::bsp::BspBarrier;
 use crate::network::router::RoutingTable;
 
-use crate::network::io_server::{ExternalIoHeaderV2, IoMultiplexer};
 use crate::network::inter_node::{SpikeBatchHeaderV2, SpikeEventV2, InterNodeRouter};
 
 pub mod recovery;
@@ -18,7 +17,7 @@ pub enum ComputeCommand {
     RunBatch {
         tick_base: u32,
         batch_size: u32,
-        input_mask: Option<Vec<u32>>,
+        global_dopamine: i16,
     },
     Shutdown,
 }
@@ -26,6 +25,9 @@ pub enum ComputeCommand {
 pub enum ComputeFeedback {
     BatchComplete {
         ticks_processed: u32,
+        zone_hash: u32,
+        pinned_out_ptr: usize,
+        output_bytes: usize,
     },
 }
 
@@ -36,33 +38,37 @@ pub struct NodeRuntime {
     pub compute_dispatchers: Mutex<HashMap<u32, Sender<ComputeCommand>>>,
     pub feedback_sender: Sender<ComputeFeedback>,
     pub feedback_receiver: Receiver<ComputeFeedback>,
-    pub input_rx: Mutex<tokio::sync::mpsc::UnboundedReceiver<(ExternalIoHeaderV2, Vec<u32>)>>,
     pub ghost_rx: Mutex<tokio::sync::mpsc::UnboundedReceiver<(SpikeBatchHeaderV2, Vec<SpikeEventV2>)>>,
+    pub telemetry_swapchain: Arc<crate::network::telemetry::TelemetrySwapchain>,
     pub total_ticks: Arc<AtomicU32>,
     pub local_ip: std::net::Ipv4Addr,
     pub local_port: u16,
-    pub telemetry_swapchain: Arc<crate::network::telemetry::TelemetrySwapchain>,
+    /// [DOD] Маршруты выходов: zone_hash -> (TargetAddr, matrix_hash)
+    pub output_routes: HashMap<u32, Vec<(String, u32)>>,
+    pub intra_gpu_channels: Vec<(u32, u32, crate::network::intra_gpu::IntraGpuChannel)>,
+    pub axon_head_ptrs: HashMap<u32, *mut u32>,
 }
 
+unsafe impl Send for NodeRuntime {}
+unsafe impl Sync for NodeRuntime {}
+
 impl NodeRuntime {
-    /// Bootstraps the IO layer and spawns dedicated OS threads for shards.
     pub fn boot(
-        shards: Vec<(u32, ShardEngine)>,
+        shards: Vec<(u32, ShardEngine, u32, u32, *const u32, std::path::PathBuf)>,
         io_server: Arc<ExternalIoServer>,
         routing_table: Arc<RoutingTable>,
         bsp_barrier: Arc<Mutex<BspBarrier>>,
         telemetry_swapchain: Arc<crate::network::telemetry::TelemetrySwapchain>,
         local_ip: std::net::Ipv4Addr,
         local_port: u16,
+        output_routes: HashMap<u32, Vec<(String, u32)>>,
+        intra_gpu_channels: Vec<(u32, u32, crate::network::intra_gpu::IntraGpuChannel)>,
+        axon_head_ptrs: HashMap<u32, *mut u32>,
     ) -> Self {
-        let (feedback_tx, feedback_rx) = bounded(shards.len() + 32); 
+        let (feedback_tx, feedback_rx) = bounded(shards.len() + 32);
         let total_ticks = Arc::new(AtomicU32::new(0));
 
-        let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ghost_tx, ghost_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        // Spawn UDP Multiplexers (Contract §2.7)
-        tokio::spawn(IoMultiplexer::spawn_input_listener(8081, input_tx));
         tokio::spawn(InterNodeRouter::spawn_ghost_listener(8083, ghost_tx));
 
         let node = Self {
@@ -72,31 +78,44 @@ impl NodeRuntime {
             compute_dispatchers: Mutex::new(HashMap::new()),
             feedback_sender: feedback_tx,
             feedback_receiver: feedback_rx,
-            input_rx: Mutex::new(input_rx),
             ghost_rx: Mutex::new(ghost_rx),
             total_ticks,
             local_ip,
             local_port,
             telemetry_swapchain,
+            output_routes,
+            intra_gpu_channels,
+            axon_head_ptrs,
         };
 
-        for (hash, shard) in shards {
-            node.spawn_shard_thread(hash, shard);
+        for (hash, shard, v_axons, outputs, m_somas, baked_dir) in shards {
+            node.spawn_shard_thread(hash, shard, v_axons, outputs, m_somas, baked_dir);
         }
 
         node
     }
 
-    /// Spawns a dedicated OS thread for a shard.
-    pub fn spawn_shard_thread(&self, hash: u32, mut shard: ShardEngine) {
+    pub fn spawn_shard_thread(
+        &self, 
+        hash: u32, 
+        mut shard: ShardEngine,
+        num_virtual_axons: u32,
+        num_outputs: u32,
+        mapped_soma_ids_device: *const u32,
+        baked_dir: std::path::PathBuf,
+    ) {
         let (tx, rx) = bounded(1);
-        let telemetry = self.telemetry_swapchain.clone();
+        let _telemetry = self.telemetry_swapchain.clone();
         
-        // Allocate I/O buffers in VRAM for this shard
-        let sync_batch_ticks = 100; // TODO: Get from config
-        let max_spikes_per_tick = 100_000; // Matches ring_buffer.rs
-        let input_words_per_tick = (1024 + 31) / 32; // TODO: Get from manifest
-        let num_outputs = 0; // TODO: Get from manifest
+        // [DOD] Извлекаем Swapchain конкретно для этой зоны (Linear Search)
+        let my_io_ctx = self.io_server.io_contexts.iter()
+            .find(|(h, _)| *h == hash)
+            .map(|(_, ctx)| ctx.swapchain.clone())
+            .expect("FATAL: IO Context for zone not found");
+
+        let sync_batch_ticks = 100;
+        let max_spikes_per_tick = 100_000;
+        let input_words_per_tick = (num_virtual_axons + 31) / 32; 
 
         let mut d_input = ptr::null_mut();
         let mut d_spikes = ptr::null_mut();
@@ -113,59 +132,121 @@ impl NodeRuntime {
             );
         }
 
-        let io_buffers = Arc::new(genesis_compute::compute::shard::IoDeviceBuffers {
+        let io_buffers = genesis_compute::compute::shard::IoDeviceBuffers {
             d_input_bitmask: d_input,
             d_incoming_spikes: d_spikes,
             d_output_history: d_output,
             max_spikes_per_tick,
             input_words_per_tick,
             num_outputs,
-        });
+        };
+
+        // [DOD] Pre-allocate Pinned RAM for outputs (Invariant #3)
+        let output_bytes = (num_outputs * sync_batch_ticks) as usize;
+        let mut pinned_out = genesis_compute::memory::PinnedBuffer::<u8>::new(output_bytes).unwrap();
 
         {
             let mut dispatchers = self.compute_dispatchers.lock().unwrap();
             dispatchers.insert(hash, tx);
         }
-        
+
         let f_tx = self.feedback_sender.clone();
         let bsp_barrier = self.bsp_barrier.clone();
+        let mapped_soma_ids_ptr = mapped_soma_ids_device as usize;
 
         thread::Builder::new()
             .name(format!("compute-{}", hash))
             .spawn(move || {
+                let mapped_soma_ids = mapped_soma_ids_ptr as *const u32;
+                let mut batch_counter: u64 = 0;
                 while let Ok(cmd) = rx.recv() {
                     match cmd {
-                        ComputeCommand::RunBatch { tick_base: _, batch_size, input_mask } => {
+                        ComputeCommand::RunBatch { tick_base: _, batch_size, global_dopamine } => {
+                            // [DOD] Заливаем дофамин в Constant Memory GPU перед стартом физики
+                            unsafe {
+                                genesis_compute::ffi::update_global_dopamine(
+                                    global_dopamine, 
+                                    std::ptr::null_mut()
+                                );
+                            }
+
                             let (incoming_spikes, spike_counts) = {
                                 let bsp = bsp_barrier.lock().unwrap();
                                 let schedule = bsp.get_read_schedule();
                                 (schedule.ghost_ids.clone(), schedule.counts.clone())
                             };
 
+                            // [DOD] Читаем изоляционный указатель на Pinned RAM именно этой зоны
+                            let input_ptr = my_io_ctx.consume_for_gpu();
+                            let input_slice = if !input_ptr.is_null() && input_words_per_tick > 0 {
+                                unsafe {
+                                    Some(std::slice::from_raw_parts(
+                                        input_ptr as *const u32,
+                                        (input_words_per_tick * batch_size) as usize,
+                                    ))
+                                }
+                            } else {
+                                None
+                            };
+
+                            // [DOD] Virtual аксоны лежат в хвосте массива axon_heads
+                            let virtual_offset = shard.vram.total_axons - num_virtual_axons;
+
                             shard.step_day_phase_batch(
                                 batch_size,
                                 &io_buffers,
-                                input_mask.as_deref(),
+                                input_slice,
                                 Some(&incoming_spikes),
                                 &spike_counts,
-                                0, // virtual_offset
-                                0, // num_virtual_axons
-                                std::ptr::null(), // mapped_soma_ids_device
+                                virtual_offset, // Исправлено: теперь бьёт в хвост
+                                num_virtual_axons,
+                                mapped_soma_ids,
                             );
 
-                            // Capture telemetry spikes if any clients are connected
-                            if telemetry.is_active() {
-                                    // 1. Reset device-side count (if not already handled)
-                                    // 2. Launch extract kernel (if not already handled in step_day_phase_batch)
-                                    // 3. DMA D2H to Telemetry back_buffer
-                                    // 4. swap_and_ready
-                                    
-                                    // For now, we assume step_day_phase_batch or a manual kernel call fills telemetry_count
-                                    // Since telemetry is high-level, we'll use a simplified version for now:
-                                    // tele.swap_and_ready(count, tick_base as u64);
+                            // [DOD] D2H DMA: Скачиваем выходы из VRAM в Pinned RAM
+                            if num_outputs > 0 {
+                                unsafe {
+                                    genesis_compute::ffi::gpu_memcpy_device_to_host(
+                                        pinned_out.as_mut_ptr() as *mut _,
+                                        io_buffers.d_output_history as *const _,
+                                        output_bytes,
+                                    );
+                                }
                             }
 
-                            if let Err(_) = f_tx.send(ComputeFeedback::BatchComplete { ticks_processed: batch_size }) {
+                            // [DOD] Hot Checkpointing (Zero-Copy VRAM Dump)
+                            let batch_idx = batch_counter;
+                            if batch_idx > 0 && batch_idx % 500 == 0 {
+                                let (_, total_size) = genesis_compute::memory::calculate_state_blob_size(shard.vram.padded_n as usize);
+                                let mut host_state = vec![0u8; total_size];
+
+                                unsafe {
+                                    // soma_voltage — это base_ptr всего SoA блока.
+                                    // Копируем весь контейнер за один DMA трансфер.
+                                    genesis_compute::ffi::gpu_memcpy_device_to_host(
+                                        host_state.as_mut_ptr() as *mut _,
+                                        shard.vram.ptrs.soma_voltage as *const _,
+                                        total_size,
+                                    );
+                                }
+
+                                let chk_path = baked_dir.join("checkpoint.state");
+                                let tmp_path = baked_dir.join("checkpoint.state.tmp");
+
+                                // Атомарная запись через .tmp защищает от краша
+                                if std::fs::write(&tmp_path, &host_state).is_ok() {
+                                    let _ = std::fs::rename(&tmp_path, &chk_path);
+                                    println!("💾 [Shard {:08X}] State checkpoint saved: {} MB", hash, total_size / 1024 / 1024);
+                                }
+                            }
+                            batch_counter += 1;
+
+                            if let Err(_) = f_tx.send(ComputeFeedback::BatchComplete { 
+                                ticks_processed: batch_size,
+                                zone_hash: hash,
+                                pinned_out_ptr: pinned_out.as_ptr() as usize,
+                                output_bytes,
+                            }) {
                                 break;
                             }
                         }
@@ -175,18 +256,21 @@ impl NodeRuntime {
             }).expect("Failed to spawn compute thread");
     }
 
-    /// The main Node Loop (BSP Orchestrator).
     pub async fn run_node_loop(&self, batch_size: u32) {
         let mut current_tick = 0;
 
+        // [DOD] Pre-allocate outbound buffers to avoid heap thrashing (Invariant #3)
+        let mut _io_tx_buffer = vec![0u8; genesis_core::constants::MAX_UDP_PAYLOAD];
+        let mut _bsp_tx_buffer: Vec<u8> = Vec::with_capacity(genesis_core::constants::MAX_UDP_PAYLOAD);
+
+        println!("[Node] Entering main loop (Batch size: {})", batch_size);
+
         loop {
-            // [Architectural Invariant] BSP Barrier: Swap buffers for high-performance scheduling.
-            // This is the ONLY place where we lock the barrier in the hot loop.
+            // 1. Synchronize BSP and consume Ghost events
             {
                 let mut bsp = self.bsp_barrier.lock().unwrap();
                 bsp.sync_and_swap();
 
-                // [Drainage Invariant] Zero-Lock Drainage from UDP channels into the NEW write buffer.
                 let mut g_rx = self.ghost_rx.lock().unwrap();
                 let schedule = bsp.get_write_schedule();
                 while let Ok((_header, events)) = g_rx.try_recv() {
@@ -196,35 +280,69 @@ impl NodeRuntime {
                 }
             }
 
-            // Drain input bitmasks (Take the latest one for this batch)
-            let mut latest_input = None;
-            {
-                let mut i_rx = self.input_rx.lock().unwrap();
-                while let Ok((_header, mask)) = i_rx.try_recv() {
-                    latest_input = Some(mask);
-                }
+            // 1. Swap IO Buffers (Acquire semantics)
+            for (_, io_ctx) in &self.io_server.io_contexts {
+                io_ctx.swapchain.swap();
             }
 
-            // [Barrier Invariant] All compute threads are quiescent here.
+            // 2. Dispatch batches to compute shards
+            let current_dopamine = self.io_server.global_dopamine.load(Ordering::Relaxed) as i16;
+            if current_dopamine != 0 {
+                println!("💉 [Node] Propagating Dopamine: {}", current_dopamine);
+            }
+
             let num_dispatchers = {
                 let dispatchers_guard = self.compute_dispatchers.lock().unwrap();
                 let num = dispatchers_guard.len();
-                let input_clone = latest_input.clone();
+                if num == 0 {
+                    println!("[!] ERROR: No compute dispatchers found!");
+                }
                 for tx in dispatchers_guard.values() {
                     let _ = tx.send(ComputeCommand::RunBatch {
                         tick_base: current_tick as u32,
                         batch_size,
-                        input_mask: input_clone.clone(),
+                        global_dopamine: current_dopamine,
                     });
                 }
                 num
             };
 
+            // 3. Collect feedback and ship outputs
             for _ in 0..num_dispatchers {
-                if let Ok(ComputeFeedback::BatchComplete { ticks_processed }) = self.feedback_receiver.recv() {
-                    self.total_ticks.fetch_add(ticks_processed, Ordering::Relaxed);
+                if let Ok(feedback) = self.feedback_receiver.recv() {
+                    match feedback {
+                        ComputeFeedback::BatchComplete { ticks_processed: _, zone_hash, pinned_out_ptr, output_bytes } => {
+                            if output_bytes > 0 {
+                                println!("[Node] Batch Complete (Zone: 0x{:08X}, Out: {} bytes)", zone_hash, output_bytes);
+                                
+                                // [DOD] Ship outputs to network targets
+                                if let Some(routes) = self.output_routes.get(&zone_hash) {
+                                    for (addr, m_hash) in routes {
+                                        self.io_server.send_output_batch(
+                                            &addr, 
+                                            zone_hash,
+                                            *m_hash,
+                                            pinned_out_ptr,
+                                            output_bytes,
+                                            &mut _io_tx_buffer
+                                        ).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
+
+            // [DOD] 4. Intra-GPU Ghost Sync (Zero-Cost VRAM-to-VRAM)
+            for (src_hash, dst_hash, channel) in &self.intra_gpu_channels {
+                if let (Some(&src_ptr), Some(&dst_ptr)) = (self.axon_head_ptrs.get(src_hash), self.axon_head_ptrs.get(dst_hash)) {
+                    unsafe {
+                        channel.sync_ghosts(src_ptr, dst_ptr, std::ptr::null_mut());
+                    }
+                }
+            }
+            unsafe { genesis_compute::ffi::gpu_stream_synchronize(std::ptr::null_mut()); }
 
             current_tick += batch_size;
             self.io_server.dashboard.total_ticks.store(current_tick as u64, Ordering::Relaxed);

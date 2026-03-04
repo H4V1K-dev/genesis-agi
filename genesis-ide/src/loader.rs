@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 use std::thread;
-
-const GEOM_URL: &str = "127.0.0.1:8001";
+use crate::config::IdeConfig;
 
 #[derive(States, Default, Debug, Clone, Eq, PartialEq, Hash)]
 pub enum IdeState {
@@ -12,13 +11,15 @@ pub enum IdeState {
 }
 
 #[derive(Resource)]
-pub struct GeometryReceiver(pub crossbeam_channel::Receiver<Vec<[f32; 4]>>);
+pub struct GeometryReceiver(pub crossbeam_channel::Receiver<Vec<u32>>);
 
 pub struct LoaderPlugin;
 
 impl Plugin for LoaderPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<IdeState>()
+           // Важно: OnEnter запускается в Startup, который ПОСЛЕ PreStartup,
+           // поэтому IdeConfig гарантированно будет существовать
            .add_systems(OnEnter(IdeState::Connecting), fetch_real_geometry)
            .add_systems(Update, check_geometry_finished.run_if(in_state(IdeState::LoadingGeometry)));
     }
@@ -27,9 +28,12 @@ impl Plugin for LoaderPlugin {
 fn fetch_real_geometry(
     mut commands: Commands,
     mut next_state: ResMut<NextState<IdeState>>,
+    config: Res<IdeConfig>,
 ) {
     let (tx, rx) = crossbeam_channel::bounded(1);
     commands.insert_resource(GeometryReceiver(rx));
+
+    let addr = format!("{}:{}", config.target_ip, config.geom_port);
 
     thread::spawn(move || {
         use tokio::net::TcpStream;
@@ -42,44 +46,44 @@ fn fetch_real_geometry(
             .unwrap();
 
         rt.block_on(async {
-            info!("Connecting to GeometryServer at {}...", GEOM_URL);
+            println!("[Loader] Connecting to GeometryServer at {}...", addr);
             
-            let mut stream = match TcpStream::connect(GEOM_URL).await {
+            let mut stream = match TcpStream::connect(&addr).await {
                 Ok(s) => s,
                 Err(e) => {
-                    error!("GeometryServer connection failed: {}", e);
+                    eprintln!("[Loader] FATAL: GeometryServer offline at {}: {}", addr, e);
                     return;
                 }
             };
 
             // Send "GEOM" request magic
             if let Err(e) = stream.write_all(b"GEOM").await {
-                error!("Failed to send GEOM request: {}", e);
+                eprintln!("[Loader] Failed to send GEOM request: {}", e);
                 return;
             }
 
             // Read magic and count
             let mut header = [0u8; 8];
             if let Err(e) = stream.read_exact(&mut header).await {
-                error!("Failed to read geometry header: {}", e);
+                eprintln!("[Loader] Failed to read geometry header: {}", e);
                 return;
             }
 
             if &header[0..4] != b"GEOM" {
-                error!("Invalid GEOM magic from server");
+                eprintln!("[Loader] Invalid GEOM magic from server");
                 return;
             }
 
             let num_neurons = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-            info!("Server reporting {} neurons", num_neurons);
+            println!("[Loader] Server reporting {} neurons", num_neurons);
 
-            let mut buffer = vec![0u8; num_neurons * 16];
+            let mut buffer = vec![0u8; num_neurons * 4];
             if let Err(e) = stream.read_exact(&mut buffer).await {
-                error!("Failed to read geometry data: {}", e);
+                eprintln!("[Loader] Failed to read geometry data: {}", e);
                 return;
             }
 
-            let geometry: Vec<[f32; 4]> = bytemuck::cast_slice(&buffer).to_vec();
+            let geometry: Vec<u32> = bytemuck::cast_slice(&buffer).to_vec();
             let _ = tx.send(geometry);
         });
     });
@@ -104,6 +108,6 @@ fn check_geometry_finished(
 }
 
 #[derive(Resource)]
-pub struct LoadedGeometry(pub Vec<[f32; 4]>);
+pub struct LoadedGeometry(pub Vec<u32>);
 
 

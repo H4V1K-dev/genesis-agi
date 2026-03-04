@@ -42,13 +42,16 @@ impl SpatialGrid {
         ((cx as u64) & 0xFFF) | (((cy as u64) & 0xFFF) << 12) | (((cz as u64) & 0xFF) << 24)
     }
 
-    /// Возвращает итератор по всем dense_id в заданном радиусе (в чанках)
-    pub fn query_radius(&self, pos: &PackedPosition, radius_cells: i32) -> Vec<u32> {
+    /// Выполняет замыкание для каждого dense_id в заданном радиусе (в чанках).
+    /// Zero-allocation: не создает промежуточных Vec.
+    #[inline(always)]
+    pub fn for_each_in_radius<F>(&self, pos: &PackedPosition, radius_cells: i32, mut f: F)
+    where
+        F: FnMut(u32),
+    {
         let cx = (pos.x() as u32 / self.cell_size) as i32;
         let cy = (pos.y() as u32 / self.cell_size) as i32;
         let cz = (pos.z() as u32 / self.cell_size) as i32;
-
-        let mut result = Vec::new();
 
         for z in (cz - radius_cells)..=(cz + radius_cells) {
             if z < 0 { continue; }
@@ -56,15 +59,16 @@ impl SpatialGrid {
                 if y < 0 { continue; }
                 for x in (cx - radius_cells)..=(cx + radius_cells) {
                     if x < 0 { continue; }
-                    
+
                     let hash = Self::hash_cell(x as u32, y as u32, z as u32);
                     if let Some(ids) = self.cells.get(&hash) {
-                        result.extend_from_slice(ids);
+                        for &id in ids {
+                            f(id);
+                        }
                     }
                 }
             }
         }
-        result
     }
 
     #[inline(always)]

@@ -4,26 +4,30 @@ use bevy::{
     prelude::*,
     render::{render_resource::*, storage::ShaderStorageBuffer},
 };
-use bytemuck::{Pod, Zeroable};
-use crate::telemetry::{SpikeFrameEvent, GpuSpikeBuffer, SpikeData};
-use crate::loader::{IdeState, LoadedGeometry};
+use crate::loader::LoadedGeometry;
 use crate::hud::SelectionState;
 
-#[repr(C)]
-#[allow(dead_code)]
-#[derive(Clone, Copy, Pod, Zeroable, Default, Debug, ShaderType)]
-pub struct NeuronInstance {
-    pub global_idx: u32,
-    pub emissive: f32,
-    pub selected: u32,
+#[derive(Resource)]
+pub struct GpuSelectionBuffer {
+    pub handle: Handle<ShaderStorageBuffer>,
+    pub bitmask: Vec<u32>,
 }
 
-#[derive(Component)]
-pub struct NeuronLayerData {
-    pub type_id: u8,
-    pub instances: Vec<NeuronInstance>,
-    pub needs_buffer_update: bool,
+#[derive(ShaderType, Clone, Debug)]
+pub struct NeuronPalette {
+    pub colors: [LinearRgba; 16],
 }
+
+impl Default for NeuronPalette {
+    fn default() -> Self {
+        let mut colors = [LinearRgba::WHITE; 16];
+        for i in 0..16 {
+            colors[i] = Color::hsl((i as f32) * 22.5, 0.8, 0.5).into();
+        }
+        Self { colors }
+    }
+}
+
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum ViewMode {
@@ -80,13 +84,16 @@ pub struct NeuronInstancedMaterial {
     pub uniforms: MaterialUniforms,
 
     #[storage(1, read_only)]
-    pub instances: Handle<ShaderStorageBuffer>,
+    pub selection: Handle<ShaderStorageBuffer>,
 
     #[storage(2, read_only)]
     pub geometry: Handle<ShaderStorageBuffer>,
 
     #[storage(3, read_only)]
     pub telemetry: Handle<ShaderStorageBuffer>,
+
+    #[uniform(4)]
+    pub palette: NeuronPalette,
 }
 
 impl Material for NeuronInstancedMaterial {
@@ -109,11 +116,9 @@ impl Plugin for WorldViewPlugin {
             .add_systems(
                 Update,
                 (
-                    sync_selection_to_instances,
-                    sync_vram_buffers,
+                    sync_selection_to_gpu,
                     handle_view_mode_toggle,
                     handle_clipping_plane,
-                    sync_neuron_vram_buffers,
                     check_geometry_applied.run_if(resource_exists::<LoadedGeometry>),
                 )
                     .chain(),
@@ -124,95 +129,38 @@ impl Plugin for WorldViewPlugin {
 fn setup_world_rendering(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut materials: ResMut<Assets<NeuronInstancedMaterial>>,
     settings: Res<RenderSettings>,
 ) {
     let mesh_handle = meshes.add(Sphere::new(0.5).mesh().ico(2).unwrap());
 
-    for type_id in 0..16 {
-        let color = get_type_color(type_id);
-        let instances = buffers.add(ShaderStorageBuffer::from(Vec::<NeuronInstance>::new()));
-        let material = materials.add(NeuronInstancedMaterial {
-            uniforms: MaterialUniforms {
-                base_color: color,
-                clip_plane: settings.clip_plane,
-                view_mode: ViewMode::Solid as u32,
-                _padding: Vec3::ZERO,
-            },
-            instances,
-            geometry: Handle::default(),
-            telemetry: Handle::default(), 
-        });
+    let material = materials.add(NeuronInstancedMaterial {
+        uniforms: MaterialUniforms {
+            base_color: LinearRgba::WHITE,
+            clip_plane: settings.clip_plane,
+            view_mode: ViewMode::Solid as u32,
+            _padding: Vec3::ZERO,
+        },
+        selection: Handle::default(),
+        geometry: Handle::default(),
+        telemetry: Handle::default(), 
+        palette: NeuronPalette::default(),
+    });
 
-        commands.spawn((
-            Mesh3d(mesh_handle.clone()),
-            MeshMaterial3d(material),
-            Transform::from_xyz(0., 0., 0.),
-            NeuronLayerData {
-                type_id: type_id as u8,
-                instances: Vec::new(),
-                needs_buffer_update: false,
-            },
-        ));
-        
-        println!("[world] Initialized neuron layer {}", type_id);
-    }
+    commands.spawn((
+        Mesh3d(mesh_handle),
+        MeshMaterial3d(material),
+        Transform::from_xyz(0., 0., 0.),
+    ));
     
-    println!("[world] 16 neuron layers ready for GPU Instancing");
+    println!("[world] Unified BrainMesh ready for GPU Instancing");
 }
 
-fn get_type_color(type_id: u8) -> LinearRgba {
-    Color::hsl((type_id as f32) * 22.5, 0.8, 0.5).into()
+fn get_type_color(_type_id: u8) -> LinearRgba {
+    Color::hsl((_type_id as f32) * 22.5, 0.8, 0.5).into()
 }
 
-fn apply_telemetry_spikes(
-    mut query: Query<&mut NeuronLayerData>,
-    mut spike_events: EventReader<SpikeFrameEvent>,
-    spike_map: Option<Res<GlobalSpikeMap>>,
-) {
-    let Some(global_map) = spike_map else { return };
-
-    // 1. Плоский массив преаллоцированных батчей (Zero-Cost allocations)
-    // Вместо HashMap — прямая индексация в array за O(1) без хэширования
-    let mut batches: [Vec<u32>; 16] = std::array::from_fn(|_| Vec::with_capacity(1000));
-
-    // 2. Быстрая диспетчеризация через прямой доступ по type_id
-    for ev in spike_events.read() {
-        for &dense_id in &ev.spike_ids {
-            if let Some(route) = global_map.map.get(dense_id as usize) {
-                batches[route.type_id as usize].push(route.local_idx);
-            }
-        }
-    }
-
-    // 3. Обновление слоёв без mutual borrow
-    for mut layer in query.iter_mut() {
-        let t_id = layer.type_id as usize;
-        let active_local_ids = &batches[t_id];
-        let mut dirty = false;
-
-        // Fade out
-        for instance in layer.instances.iter_mut() {
-            if instance.emissive > 0.0 {
-                instance.emissive = (instance.emissive - 0.05).max(0.0);
-                dirty = true;
-            }
-        }
-
-        // Инъекция спайков
-        for &local_idx in active_local_ids {
-            if let Some(instance) = layer.instances.get_mut(local_idx as usize) {
-                instance.emissive = 1.0;
-                dirty = true;
-            }
-        }
-
-        if dirty {
-            layer.needs_buffer_update = true;
-        }
-    }
-}
+// Redundant apply_telemetry_spikes removed. Using telemetry.rs version.
 
 fn check_geometry_applied(
     mut commands: Commands,
@@ -220,106 +168,69 @@ fn check_geometry_applied(
     mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut materials: ResMut<Assets<NeuronInstancedMaterial>>,
     q_materials: Query<&MeshMaterial3d<NeuronInstancedMaterial>>,
-    mut q_layers: Query<&mut NeuronLayerData>,
 ) {
-    info!("Initializing GPU Geometry Buffer for {} neurons", loaded.0.len());
+    let num_neurons = loaded.0.len();
+    info!("Initializing GPU Buffers for {} neurons", num_neurons);
     
-    let buffer_handle = buffers.add(ShaderStorageBuffer::from(loaded.0.clone()));
-    commands.insert_resource(GpuGeometryBuffer { buffer: buffer_handle.clone() });
+    let geom_handle = buffers.add(ShaderStorageBuffer::from(loaded.0.clone()));
+    commands.insert_resource(GpuGeometryBuffer { buffer: geom_handle.clone() });
 
-    // Update all materials to use this geometry buffer
+    // Инициализация маски выделения (1 бит = 1 нейрон)
+    let num_words = (num_neurons + 31) / 32;
+    let selection_bitmask = vec![0u32; num_words];
+    let selection_handle = buffers.add(ShaderStorageBuffer::from(selection_bitmask.clone()));
+    
+    commands.insert_resource(GpuSelectionBuffer {
+        handle: selection_handle.clone(),
+        bitmask: selection_bitmask,
+    });
+
+    // Инициализация телеметрии
+    let identities = vec![0.0f32; num_neurons];
+    let telemetry_handle = buffers.add(ShaderStorageBuffer::from(identities.clone()));
+    
+    commands.insert_resource(crate::telemetry::GpuSpikeBuffer {
+        handle: telemetry_handle.clone(),
+        intensities: identities,
+    });
+
+    // Update all materials to use these buffers
     for mat_handle in q_materials.iter() {
         if let Some(material) = materials.get_mut(&mat_handle.0) {
-            material.geometry = buffer_handle.clone();
+            material.geometry = geom_handle.clone();
+            material.selection = selection_handle.clone();
+            material.telemetry = telemetry_handle.clone();
         }
     }
 
-    for mut layer in q_layers.iter_mut() {
-        let type_id = layer.type_id;
-        layer.instances.clear();
-        for (global_idx, pos) in loaded.0.iter().enumerate() {
-            let p_type = pos[3] as u8;
-            if p_type == type_id {
-                layer.instances.push(NeuronInstance {
-                    global_idx: global_idx as u32,
-                    emissive: 0.0,
-                    selected: 0,
-                });
-            }
-        }
-        layer.needs_buffer_update = true;
-    }
-
-    // We keep LoadedGeometry for CPU side lookups (inspector)
-    info!("GPU Geometry Buffer initialized and applied to materials.");
+    info!("GPU Geometry & Selection Buffers initialized.");
+    // We keep LoadedGeometry for CPU side lookups (inspector/picking)
 }
 
-/// Заливка из ECS-компонента в GPU-буфер.
-/// Выполняется ТОЛЬКО если был спайк или изменилась геометрия.
-/// Change Detection в Bevy автоматически триггерит RenderQueue::write_buffer
-/// в фазе Prepare для всех изменённых компонентов.
-fn sync_vram_buffers(
-    mut query: Query<&mut NeuronLayerData, Changed<NeuronLayerData>>,
-) {
-    for mut layer in query.iter_mut() {
-        if layer.needs_buffer_update {
-            // Флаг сброшен. Bevy Change Detection при доступе через iter_mut()
-            // автоматически пометит эту сущность для обновления в RenderQueue.
-            layer.needs_buffer_update = false;
-        }
-    }
-}
-
-fn sync_neuron_vram_buffers(
-    mut query: Query<(&mut NeuronLayerData, &MeshMaterial3d<NeuronInstancedMaterial>)>,
-    materials: Res<Assets<NeuronInstancedMaterial>>,
+pub fn sync_selection_to_gpu(
+    selection: Res<SelectionState>,
+    gpu_selection: Option<ResMut<GpuSelectionBuffer>>,
     mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
 ) {
-    for (mut layer, mat_handle) in query.iter_mut() {
-        if layer.needs_buffer_update {
-            if let Some(material) = materials.get(&mat_handle.0) {
-                if let Some(buffer) = buffers.get_mut(&material.instances) {
-                    buffer.set_data(layer.instances.as_slice());
-                }
-            }
-            layer.needs_buffer_update = false;
-        }
-    }
-}
-
-/// Система обновляет флаги выделения в инстансах при изменении SelectionState.
-pub fn sync_selection_to_instances(
-    selection: Res<SelectionState>,
-    mut q_layers: Query<&mut NeuronLayerData>,
-) {
+    // Zero-Cost: не трогаем CPU/GPU если пользователь ничего не выделял
     if !selection.is_changed() { return; }
+    let Some(mut gpu_sel) = gpu_selection else { return };
 
-    // Предподготовка: группируем выбранные локальные индексы по type_id
-    let mut per_type: [Vec<u32>; 16] = std::array::from_fn(|_| Vec::new());
-    for &(t_id, l_idx) in &selection.selected_neurons {
-        if (t_id as usize) < per_type.len() {
-            per_type[t_id as usize].push(l_idx);
+    // Быстрый сброс L1 кэша
+    gpu_sel.bitmask.fill(0);
+
+    // Установка битов для выделенных сомов
+    for &(_t_id, global_idx) in &selection.selected_neurons {
+        let word = (global_idx / 32) as usize;
+        let bit = global_idx % 32;
+        if word < gpu_sel.bitmask.len() {
+            gpu_sel.bitmask[word] |= 1 << bit;
         }
     }
 
-    // 1. Быстрый сброс O(N) и 2. Точечная установка O(M) в одном проходе по слоям
-    for mut layer in q_layers.iter_mut() {
-        // Сброс
-        for instance in layer.instances.iter_mut() {
-            instance.selected = 0;
-        }
-
-        // Установка флагов для выбранных локальных индексов этого типа
-        let t_idx = layer.type_id as usize;
-        if t_idx < per_type.len() {
-            for &local_idx in &per_type[t_idx] {
-                if let Some(instance) = layer.instances.get_mut(local_idx as usize) {
-                    instance.selected = 1;
-                }
-            }
-        }
-
-        layer.needs_buffer_update = true;
+    // Микро-DMA транзакция
+    if let Some(buffer) = buffers.get_mut(&gpu_sel.handle) {
+        buffer.set_data(gpu_sel.bitmask.as_slice());
     }
 }
 

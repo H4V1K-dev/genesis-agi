@@ -19,6 +19,7 @@ pub type CudaStream = *mut c_void;
 //   soma_to_axon       [N]     u32   | 4N bytes
 //   dendrite_targets   [128*N] u32   | 512N bytes
 //   dendrite_weights   [128*N] i16   | 256N bytes
+//   dendrite_timers    [128*N] u8    | 128N bytes
 //   axon_heads         [A]     u32   | 4A bytes  (A = total_axons)
 // =============================================================================
 #[repr(C)]
@@ -34,6 +35,7 @@ pub struct ShardVramPtrs {
     // --- Columnar Dendrites (Длина = padded_n * MAX_DENDRITES) ---
     pub dendrite_targets:  *mut u32,   // Packed: DenseID + SegmentOffset
     pub dendrite_weights:  *mut i16,   // Синаптический вес [-32768..+32767]
+    pub dendrite_timers:   *mut u8,    // Синаптическая рефрактерность
 
     // --- Axon Heads (Длина = total_axons: Local + Ghost + Virtual) ---
     pub axon_heads:        *mut u32,
@@ -43,7 +45,7 @@ unsafe impl Send for ShardVramPtrs {}
 unsafe impl Sync for ShardVramPtrs {}
 
 /// Параметры физики для одного типа (варианта) нейронов.
-/// [ЗАКОН]: Размер ДОЛЖЕН быть строго 64 байта для выравнивания в Constant Memory.
+/// [ЗАКОН]: Размер ДОЛЖЕН быть строго 128 байт для выравнивания в Constant Memory.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct VariantParameters {
@@ -59,7 +61,11 @@ pub struct VariantParameters {
     pub slot_decay_ltm: u8,
     pub slot_decay_wm: u8,
     pub signal_propagation_length: u8,
-    pub _padding: [u8; 31],
+    pub ltm_slot_count: u8,
+    pub _pad1: [u8; 2],
+    pub inertia_curve: [i16; 16],
+    pub _pad2a: [u8; 32],
+    pub _pad2b: [u8; 28],
 }
 
 #[cfg_attr(not(feature = "mock-gpu"), link(name = "genesis_cuda", kind = "static"))]

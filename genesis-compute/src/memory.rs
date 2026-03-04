@@ -1,5 +1,4 @@
 use genesis_core::layout::align_to_warp;
-use genesis_core::constants::MAX_DENDRITE_SLOTS;
 use std::ffi::c_void;
 use crate::ffi;
 use crate::ffi::ShardVramPtrs;
@@ -26,6 +25,7 @@ pub const MAX_DENDRITES: usize = 128;
 /// soma_to_axon      [padded_n]            × 4 B
 /// dendrite_targets  [padded_n × 128]      × 4 B
 /// dendrite_weights  [padded_n × 128]      × 2 B
+/// dendrite_timers   [padded_n × 128]      × 1 B
 /// ```
 /// Массив `axon_heads` хранится в отдельном `.axons`-файле.
 #[inline]
@@ -39,6 +39,7 @@ pub fn calculate_state_blob_size(neuron_count: usize) -> (usize, usize) {
     let soma_to_axon_sz     = padded_n * std::mem::size_of::<u32>();
     let dendrite_targets_sz = padded_n * MAX_DENDRITES * std::mem::size_of::<u32>();
     let dendrite_weights_sz = padded_n * MAX_DENDRITES * std::mem::size_of::<i16>();
+    let dendrite_timers_sz  = padded_n * MAX_DENDRITES * std::mem::size_of::<u8>();
 
     let total = soma_voltage_sz
         + soma_flags_sz
@@ -46,7 +47,8 @@ pub fn calculate_state_blob_size(neuron_count: usize) -> (usize, usize) {
         + timers_sz
         + soma_to_axon_sz
         + dendrite_targets_sz
-        + dendrite_weights_sz;
+        + dendrite_weights_sz
+        + dendrite_timers_sz;
 
     (padded_n, total)
 }
@@ -62,6 +64,7 @@ pub struct StateOffsets {
     pub soma_to_axon:     usize,
     pub dendrite_targets: usize,
     pub dendrite_weights: usize,
+    pub dendrite_timers:  usize,
     pub total_bytes:      usize,
 }
 
@@ -74,9 +77,10 @@ pub fn compute_state_offsets(padded_n: usize) -> StateOffsets {
     let soma_to_axon     = off; off += padded_n * 4;
     let dendrite_targets = off; off += padded_n * MAX_DENDRITES * 4;
     let dendrite_weights = off; off += padded_n * MAX_DENDRITES * 2;
+    let dendrite_timers  = off; off += padded_n * MAX_DENDRITES * 1;
     StateOffsets {
         soma_voltage, soma_flags, threshold_offset, timers,
-        soma_to_axon, dendrite_targets, dendrite_weights,
+        soma_to_axon, dendrite_targets, dendrite_weights, dendrite_timers,
         total_bytes: off,
     }
 }
@@ -111,6 +115,7 @@ impl VramState {
             soma_to_axon:     std::ptr::null_mut(),
             dendrite_targets: std::ptr::null_mut(),
             dendrite_weights: std::ptr::null_mut(),
+            dendrite_timers:  std::ptr::null_mut(),
             axon_heads:       std::ptr::null_mut(),
         };
         let err = unsafe { ffi::cu_allocate_shard(padded_n, total_axons, &mut ptrs) };

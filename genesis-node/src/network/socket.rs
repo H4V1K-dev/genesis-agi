@@ -31,30 +31,28 @@ impl NodeSocket {
     }
 
     /// Zero-copy send of a SpikeBatch
-    pub async fn send_batch(&self, target: SocketAddr, batch_id: u32, events: &[SpikeEvent]) -> Result<()> {
+    pub async fn send_batch(
+        &self, 
+        target: SocketAddr, 
+        batch_id: u32, 
+        events: &[SpikeEvent],
+        tx_buffer: &mut Vec<u8> // [DOD] Переиспользуемый буфер
+    ) -> Result<()> {
         let header = SpikeBatchHeader {
             magic: 0x5350494B, // "SPIK"
             batch_id,
         };
 
-        // We construct a single buffer using IoSlice to avoid copying, 
-        // but UdpSocket in tokio currently requires a single contiguous slice 
-        // unless we drop down to lower level traits or make a contiguous buffer.
-        // For absolute maximum efficiency we'd allocate one contiguous slice 
-        // if IoSlice isn't supported, but copying 8 bytes of header isn't the bottleneck.
-        
         let header_bytes = bytemuck::bytes_of(&header);
         let events_bytes = bytemuck::cast_slice(events);
         
-        // Since Tokio's standard UdpSocket doesn't have `send_vectored_to`, 
-        // we'll concat them into a fast contiguous buffer for the OS.
-        let mut buffer = Vec::with_capacity(header_bytes.len() + events_bytes.len());
-        buffer.extend_from_slice(header_bytes);
-        buffer.extend_from_slice(events_bytes);
+        tx_buffer.clear();
+        tx_buffer.extend_from_slice(header_bytes);
+        tx_buffer.extend_from_slice(events_bytes);
 
-        let bytes_sent = self.socket.send_to(&buffer, target).await?;
-        if bytes_sent != buffer.len() {
-            bail!("Fragmented UDP send: {} of {} bytes", bytes_sent, buffer.len());
+        let bytes_sent = self.socket.send_to(tx_buffer, target).await?;
+        if bytes_sent != tx_buffer.len() {
+            bail!("Fragmented UDP send: {} of {} bytes", bytes_sent, tx_buffer.len());
         }
 
         Ok(())

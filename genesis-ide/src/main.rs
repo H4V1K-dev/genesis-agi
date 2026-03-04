@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 mod camera;
+mod config;
 mod loader;
 mod telemetry;
 mod world;
@@ -19,6 +20,9 @@ fn main() {
     App::new()
         // Настройки окна (Blender-like)
         .insert_resource(ClearColor(Color::srgb(0.05, 0.05, 0.05))) // Тёмно-серый фон
+        // Вставляем дефолтный конфиг ДО регистрации plugins,
+        // чтобы parse_cli_config мог его перезаписать в PreStartup
+        .insert_resource(config::IdeConfig::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Genesis AGI - V1 Core Viewport".into(),
@@ -42,38 +46,12 @@ fn main() {
         .add_plugins(shard_map::ShardMapPlugin)
         .add_plugins(io_matrix::IoMatrixPlugin)
         .add_plugins(hud::HudPlugin)
+        .add_systems(PreStartup, config::parse_cli_config)
         .add_systems(Startup, camera::setup_camera)
         .add_systems(Update, (debug_spike_events, camera::camera_controller))
         .run();
 }
 
-/// Инициализация 3D-сцены
-fn setup_viewport(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    // 1. Освещение
-    commands.spawn((
-        PointLight {
-            intensity: 1500.0,
-            shadows_enabled: false,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 8.0, 4.0),
-    ));
-
-    // 2. Декоративная сетка (Grid) для оценки масштаба
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.1, 0.1, 0.15),
-            unlit: true,
-            ..default()
-        })),
-        Transform::IDENTITY,
-    ));
-}
 
 /// Временная система для дебага: проверяем, что ECS видит спайки
 fn debug_spike_events(mut events: EventReader<telemetry::SpikeFrameEvent>) {

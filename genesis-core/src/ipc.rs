@@ -404,14 +404,16 @@ mod file_ipc_tests {
 /// Header for external asynchronous I/O (Sensors/Motors) over UDP.
 /// Exactly 16 bytes.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub struct ExternalIoHeader {
     pub magic:        u32, // GSIO_MAGIC or GSOO_MAGIC
     pub zone_hash:    u32, // FNV-1a of zone name
     pub matrix_hash:  u32, // FNV-1a of matrix name
     pub payload_size: u32, // Length of data following this header
+    pub global_reward: i16, // [DOD] R-STDP Dopamine Modulator
+    pub _padding:     u16,
 }
-const _: () = assert!(std::mem::size_of::<ExternalIoHeader>() == 16, "ExternalIoHeader must be 16 bytes");
+const _: () = assert!(std::mem::size_of::<ExternalIoHeader>() == 20, "ExternalIoHeader must be 20 bytes");
 
 impl ExternalIoHeader {
     pub fn new(magic: u32, zone_hash: u32, matrix_hash: u32, payload_size: u32) -> Self {
@@ -420,6 +422,8 @@ impl ExternalIoHeader {
             zone_hash,
             matrix_hash,
             payload_size,
+            global_reward: 0,
+            _padding: 0,
         }
     }
 }

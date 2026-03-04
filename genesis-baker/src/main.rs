@@ -52,10 +52,10 @@ fn main() -> Result<()> {
     
     for conn in &brain_config.connections {
         let src_tuple = compiled_zones.get(&conn.from).expect("Source zone missing");
-        let _dst_tuple = compiled_zones.get(&conn.to).expect("Dest zone missing");
+        let dst_tuple = compiled_zones.get(&conn.to).expect("Dest zone missing");
         
         // Target offset is the end of the dest zone's local+virtual axons
-        let dst_ghost_offset = src_tuple.1 as u32; // This logic seems slightly off in original, but I'll focus on removing patching
+        let dst_ghost_offset = dst_tuple.1 as u32; 
         
         let out_dir = &brain_config.zones.iter().find(|z| z.name == conn.from).unwrap().baked_dir;
         
@@ -214,6 +214,8 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
         );
     }
 
+    let packed_positions: Vec<u32> = positions.iter().map(|p| p.0).collect();
+
     // --- 5.3 Output Readouts (Soma Readouts from io.toml) ---
     let mut baked_gxos = Vec::new();
     if !io.outputs.is_empty() {
@@ -221,7 +223,6 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
         let voxel_um = sim.simulation.voxel_size_um as f32;
         let world_w_vox = (sim.world.width_um as f32 / voxel_um) as u32;
         let world_d_vox = (sim.world.depth_um as f32 / voxel_um) as u32;
-        let packed_positions: Vec<u32> = positions.iter().map(|p| p.0).collect();
 
         for matrix in &io.outputs {
             let gxo = bake::output_map::build_gxo_mapping(
@@ -263,15 +264,45 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
         axons.len(), local_axons_count, num_virtual);
 
     // --- 6. Build SoA state ---
-    let rest_potential = const_mem.variants[0].rest_potential;
     let total_capacity = axons.len() + ghost_capacity;
     let mut shard = bake::layout::ShardSoA::new(positions.len(), total_capacity);
-    // Инициализация потенциалов из rest_potential типа 0
-    for v in shard.voltage.iter_mut() {
-        *v = rest_potential;
+
+    // [DOD Invariant] Строгая трансляция типов и потенциалов покоя
+    for (i, pos) in positions.iter().enumerate() {
+        if pos.0 == 0 { continue; } // Пропускаем пустышки от Warp Alignment
+
+        let type_idx = pos.type_id();
+        let variant = &const_mem.variants[type_idx as usize];
+
+        shard.voltage[i] = variant.rest_potential;
+        
+        // Упаковываем 4-битный тип в старшие биты флага (Spec 07 §1.1)
+        // Бит 0 (is_spiking) остаётся 0 при инициализации
+        shard.flags[i] = type_idx << 4; 
     }
 
-    // --- 7. Init axon heads ---
+    // [DOD] Маппинг локальных аксонов к сомам. Без этого локальный спайк не родит сигнал!
+    for (axon_id, axon) in axons.iter().enumerate() {
+        if axon.soma_idx != std::usize::MAX { // Игнорируем Ghost/Virtual
+            shard.soma_to_axon[axon.soma_idx] = axon_id as u32;
+        }
+    }
+
+    // --- 7. Коннектом ---
+    println!("[baker] Connecting dendrites...");
+    let total_synapses = bake::dendrite_connect::connect_dendrites(
+        &mut shard,
+        &positions,
+        &axons,
+        &neuron_types,
+        master_seed,
+        2, // Радиус поиска в чанках сетки
+    );
+    
+    let avg = if !positions.is_empty() { total_synapses as f32 / positions.len() as f32 } else { 0.0 };
+    println!("[baker] ✓ Connected {} synapses ({:.1} avg per neuron)", total_synapses, avg);
+
+    // --- 8. Init axon heads ---
     let physics = genesis_core::physics::compute_derived_physics(
         sim.simulation.signal_speed_m_s,
         sim.simulation.tick_duration_us,
@@ -292,31 +323,13 @@ fn compile(sim_path: &Path, bp_path: &Path, an_path: &Path, io_path: &Path, out_
             let dz = (ax.last_dir.z * 127.0).clamp(-127.0, 127.0) as i8 as u32;
             shard.axon_dirs_xyz[i] = (dz << 16) | (dy << 8) | dx;
         }
-        if ax.soma_idx != usize::MAX && ax.soma_idx < shard.soma_to_axon.len() {
-            shard.soma_to_axon[ax.soma_idx] = i as u32;
-        }
     }
     println!("[baker] ✓ Axon heads initialized (v_seg={})", v_seg);
 
-    // --- 8. Connect dendrites (spatial search + sprouting score) ---
-    println!("[baker] Connecting dendrites...");
-    bake::dendrite_connect::connect_dendrites(
-        &mut shard,
-        &positions,
-        &axons,
-        &const_mem,
-        master_seed,
-        sim.simulation.segment_length_voxels * 8, // conservative search radius
-    );
-    let connected = shard.dendrite_targets.iter().filter(|&&t| t != 0).count();
-    println!(
-        "[baker] ✓ Connected {} synapses ({:.1} avg per neuron)",
-        connected,
-        connected as f64 / positions.len() as f64
-    );
-
     // --- 9. Dump to disk (Zero-Copy binary: raw bytes, no serde) ---
 
+
+    shard.soma_positions.copy_from_slice(&packed_positions[..positions.len()]);
 
     shard.dump_to_disk(out_dir);
     println!("[baker] ✓ Written: shard.state + shard.axons");

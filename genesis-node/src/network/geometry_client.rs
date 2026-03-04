@@ -51,11 +51,11 @@ impl GeometryServer {
         Ok(Self { listener })
     }
 
-    /// Spawns the server loop serving the provided [f32; 4] neuron data.
-    pub fn spawn(self, geometry_data: Vec<[f32; 4]>) {
+    /// Spawns the server loop serving the provided u32 neuron data.
+    pub fn spawn(self, geometry_data: Vec<u32>) {
         let num_neurons = geometry_data.len();
         
-        let mut buf = Vec::with_capacity(8 + num_neurons * 16);
+        let mut buf = Vec::with_capacity(8 + num_neurons * 4);
         buf.extend_from_slice(b"GEOM"); 
         buf.extend_from_slice(&(num_neurons as u32).to_le_bytes());
         

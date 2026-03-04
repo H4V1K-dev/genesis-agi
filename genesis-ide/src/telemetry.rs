@@ -1,8 +1,7 @@
 use bevy::{
     prelude::*,
     render::{
-        render_resource::{StorageBuffer, ShaderType},
-        renderer::{RenderDevice, RenderQueue},
+        storage::ShaderStorageBuffer,
     },
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
@@ -11,8 +10,7 @@ use tokio::runtime::Builder;
 use futures_util::StreamExt;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use std::convert::TryInto;
-
-const WS_URL: &str = "ws://127.0.0.1:8002/ws";
+use crate::config::IdeConfig;
 
 #[derive(Event, Clone)]
 pub struct SpikeFrameEvent {
@@ -23,16 +21,11 @@ pub struct SpikeFrameEvent {
 #[derive(Resource)]
 pub struct TelemetryReceiver(pub UnboundedReceiver<(u64, Vec<u32>)>);
 
-#[derive(ShaderType, Default, Clone)]
-pub struct SpikeData {
-    #[size(runtime)]
-    pub intensities: Vec<f32>,
-}
 
 #[derive(Resource, Default)]
 pub struct GpuSpikeBuffer {
-    pub buffer: StorageBuffer<SpikeData>,
-    pub initialized: bool,
+    pub handle: Handle<ShaderStorageBuffer>,
+    pub intensities: Vec<f32>,
 }
 
 pub struct TelemetryPlugin;
@@ -46,8 +39,10 @@ impl Plugin for TelemetryPlugin {
     }
 }
 
-pub fn setup_telemetry_socket(mut commands: Commands) {
+pub fn setup_telemetry_socket(mut commands: Commands, config: Res<IdeConfig>) {
     let (tx, rx) = unbounded_channel();
+
+    let ws_url = format!("ws://{}:{}/ws", config.target_ip, config.telemetry_port);
 
     // Создаем выделенный поток ОС для сетевого реактора
     thread::spawn(move || {
@@ -58,16 +53,16 @@ pub fn setup_telemetry_socket(mut commands: Commands) {
             .expect("FATAL: Failed to build isolated Tokio runtime for Telemetry");
 
         rt.block_on(async move {
-            info!("Connecting to Genesis Telemetry at {}...", WS_URL);
-            let mut ws_stream = match connect_async(WS_URL).await {
+            println!("[Telemetry] Connecting to Genesis Telemetry at {}...", ws_url);
+            let mut ws_stream = match connect_async(&ws_url).await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
-                    error!("Telemetry WS connection failed: {}", e);
+                    eprintln!("[Telemetry] FATAL: WS connection failed at {}: {}", ws_url, e);
                     return;
                 }
             };
 
-            info!("Telemetry connected. Awaiting frames...");
+            println!("[Telemetry] Connected. Awaiting frames...");
             while let Some(msg) = ws_stream.next().await {
                 if let Ok(Message::Binary(data)) = msg {
                     if let Some((tick, spike_ids)) = decode_telemetry_frame(&data) {
@@ -113,38 +108,39 @@ pub fn drain_telemetry_socket(
 pub fn apply_telemetry_spikes(
     mut events: EventReader<SpikeFrameEvent>,
     mut gpu_buffer: ResMut<GpuSpikeBuffer>,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
+    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
 ) {
-    if !gpu_buffer.initialized {
-        // Initialize with default capacity (e.g. 500k neurons) if not done
-        // This normally happens when the connectome is loaded.
+    if gpu_buffer.intensities.is_empty() {
         return;
     }
 
-    let data = gpu_buffer.buffer.get_mut();
     let mut is_dirty = false;
+    {
+        let intensities = &mut gpu_buffer.intensities;
 
-    // 1. Быстрый Decay (линейный проход L1 Cache)
-    for glow in data.intensities.iter_mut() {
-        if *glow > 0.0 {
-            *glow = (*glow - 0.15).max(0.0);
-            is_dirty = true;
-        }
-    }
-
-    // 2. Инъекция (O(K))
-    for frame in events.read() {
-        for &id in &frame.spike_ids {
-            if let Some(glow) = data.intensities.get_mut(id as usize) {
-                *glow = 1.0;
+        // 1. Быстрый Decay (линейный проход L1 Cache)
+        for glow in intensities.iter_mut() {
+            if *glow > 0.0 {
+                *glow = (*glow - 0.15).max(0.0);
                 is_dirty = true;
+            }
+        }
+
+        // 2. Инъекция (O(K))
+        for frame in events.read() {
+            for &id in &frame.spike_ids {
+                if let Some(glow) = intensities.get_mut(id as usize) {
+                    *glow = 1.0;
+                    is_dirty = true;
+                }
             }
         }
     }
 
-    // 3. Асинхронная заливка в VRAM
+    // 3. Обновление ассета
     if is_dirty {
-        gpu_buffer.buffer.write_buffer(&render_device, &render_queue);
+        if let Some(buffer) = buffers.get_mut(&gpu_buffer.handle) {
+            buffer.set_data(gpu_buffer.intensities.as_slice());
+        }
     }
 }

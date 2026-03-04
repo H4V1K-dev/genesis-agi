@@ -20,6 +20,15 @@ pub struct ManifestVariant {
     pub slot_decay_ltm: u8,
     pub slot_decay_wm: u8,
     pub signal_propagation_length: u8,
+    #[serde(default = "default_ltm_slot_count")]
+    pub ltm_slot_count: u8,
+    #[serde(default = "default_inertia_curve")]
+    pub inertia_curve: [i16; 16],
+}
+
+fn default_ltm_slot_count() -> u8 { 80 }
+fn default_inertia_curve() -> [i16; 16] {
+    [128, 120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8]
 }
 
 /// 2. GPU Layout: Строгий C-формат. Отсутствуют ссылки и объекты кучи.
@@ -39,7 +48,11 @@ pub struct GpuVariantParameters {
     pub slot_decay_ltm: u8,
     pub slot_decay_wm: u8,
     pub signal_propagation_length: u8,
-    pub _padding: [u8; 31],
+    pub ltm_slot_count: u8,
+    pub _pad1: [u8; 2],
+    pub inertia_curve: [i16; 16],
+    pub _pad2a: [u8; 32],
+    pub _pad2b: [u8; 28],
 }
 
 impl ManifestVariant {
@@ -58,7 +71,11 @@ impl ManifestVariant {
             slot_decay_ltm: self.slot_decay_ltm,
             slot_decay_wm: self.slot_decay_wm,
             signal_propagation_length: self.signal_propagation_length,
-            _padding: [0; 31],
+            ltm_slot_count: self.ltm_slot_count,
+            _pad1: [0; 2],
+            inertia_curve: self.inertia_curve,
+            _pad2a: [0; 32],
+            _pad2b: [0; 28],
         }
     }
 }

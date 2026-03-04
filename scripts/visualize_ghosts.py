@@ -10,7 +10,7 @@ matplotlib.use('Agg')  # Безголовый рендер
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-GHOSTS_FILE = "/home/alex/Workflow/Genesis/baked/PingPongBrain/SensoryCortex/SensoryCortex_MotorCortex.ghosts"
+GHOSTS_FILE = "/home/alex/Workflow/Genesis/baked/SensoryCortex/SensoryCortex_HiddenCortex.ghosts"
 PADDED_N_A = 8640
 PADDED_N_B = 8640
 

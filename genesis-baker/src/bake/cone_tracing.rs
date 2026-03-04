@@ -31,20 +31,19 @@ pub fn calculate_v_attract(
     // Переводим радиус поиска из мкм в чанки для SpatialGrid
     let radius_cells = (params.radius_um / (grid.cell_size as f32 * voxel_size_um)).ceil() as i32;
 
-    // O(1) извлечение соседей из хэш-таблицы
-    let neighbors = grid.query_radius(&origin_pos, radius_cells);
     let mut v_attract = Vec3::ZERO;
 
-    for dense_id in neighbors {
+    // O(K) Zero-allocation spatial query
+    grid.for_each_in_radius(&origin_pos, radius_cells, |dense_id| {
         let neighbor_pos = grid.get_position(dense_id);
         
         // 1. Быстрый аппаратный фильтр по маске типа (0 бит float-математики)
         if let Some(t) = params.target_type {
-            if neighbor_pos.type_id() != t { continue; }
+            if neighbor_pos.type_id() != t { return; }
         }
 
         // 2. Игнорируем себя (коллизия координат)
-        if neighbor_pos.0 == origin_pos.0 { continue; }
+        if neighbor_pos.0 == origin_pos.0 { return; }
 
         let target_vec = unpack_to_vec3(neighbor_pos, voxel_size_um);
         let diff = target_vec - origin_vec;
@@ -52,7 +51,7 @@ pub fn calculate_v_attract(
 
         // 3. Быстрое отсечение по сфере (через квадрат, никаких sqrt!)
         if dist_sq > params.radius_um * params.radius_um || dist_sq == 0.0 {
-            continue;
+            return;
         }
 
         let dist = dist_sq.sqrt();
@@ -66,7 +65,7 @@ pub fn calculate_v_attract(
             let weight = 1.0 / (dist_sq + 1.0); // +1.0 защита от NaN
             v_attract += dir_to_target * weight;
         }
-    }
+    });
 
     // Если в конусе пусто, вектор нулевой. Иначе возвращаем нормализованную тягу.
     if v_attract.length_squared() > 0.0 {

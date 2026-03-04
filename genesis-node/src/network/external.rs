@@ -111,30 +111,37 @@ impl ExternalIoServer {
     }
 
     /// Отправка Output_History (Вызывается оркестратором после RecordReadout)
-    pub async fn send_output_batch(&self, target_addr: &str, zone_hash: u32, matrix_hash: u32, pinned_output_addr: usize, output_bytes: usize) {
-        if output_bytes + IO_HEADER_SIZE > 65535 {
-            panic!("Output batch exceeds UDP MTU. Needs fragmentation.");
+    pub async fn send_output_batch(
+        &self, 
+        target_addr: &str, 
+        zone_hash: u32, 
+        matrix_hash: u32, 
+        pinned_output_addr: usize, 
+        output_bytes: usize,
+        tx_buffer: &mut [u8] // [DOD] Переиспользуемый буфер от Caller'а
+    ) {
+        let total_size = IO_HEADER_SIZE + output_bytes;
+        if total_size > 65535 || total_size > tx_buffer.len() {
+            panic!("Output batch exceeds UDP MTU or buffer capacity.");
         }
 
-        let mut out_buf = vec![0u8; IO_HEADER_SIZE + output_bytes]; // Fast enough for outbound
-        
         unsafe {
-            let header = out_buf.as_mut_ptr() as *mut ExternalIoHeader;
+            let header = tx_buffer.as_mut_ptr() as *mut ExternalIoHeader;
             (*header).zone_hash = zone_hash;
             (*header).matrix_hash = matrix_hash;
             (*header).payload_size = output_bytes as u32;
+            (*header).global_reward = self.global_dopamine.load(Ordering::Relaxed) as i16;
+            (*header)._padding = 0;
 
             ptr::copy_nonoverlapping(
                 pinned_output_addr as *const u8,
-                out_buf.as_mut_ptr().add(IO_HEADER_SIZE),
+                tx_buffer.as_mut_ptr().add(IO_HEADER_SIZE),
                 output_bytes
             );
         }
 
-
-        let _ = self.socket.send_to(&out_buf, target_addr).await;
+        let _ = self.socket.send_to(&tx_buffer[..total_size], target_addr).await;
         
-        eprintln!("[ExternalIO] Sent output batch to {}, {} bytes", target_addr, output_bytes);
         self.dashboard.udp_out_packets.fetch_add(1, Ordering::Relaxed);
     }
 }

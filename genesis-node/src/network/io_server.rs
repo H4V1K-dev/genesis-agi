@@ -2,12 +2,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use tokio::net::UdpSocket;
 use genesis_core::ipc::{ExternalIoHeader, RouteUpdate, ROUT_MAGIC};
-use genesis_core::constants::{GSIO_MAGIC, MAX_UDP_PAYLOAD};
+use genesis_core::constants::{GSIO_MAGIC, GSOO_MAGIC, MAX_UDP_PAYLOAD};
 use genesis_compute::memory::PinnedBuffer;
 use crate::network::router::RoutingTable;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use anyhow::{Context, Result};
+
+/// Контекст I/O для конкретной зоны. Содержит персональный InputSwapchain.
+pub struct ZoneIoContext {
+    pub swapchain: Arc<InputSwapchain>,
+    pub matrix_offsets: HashMap<u32, u32>,
+}
 
 /// Lock-Free Double Buffering for External I/O.
 /// Isolates the asynchronous Tokio network thread from the synchronous GPU Orchestrator.
@@ -17,6 +23,8 @@ pub struct InputSwapchain {
     /// Pointer to the buffer currently being written to by the network thread.
     /// Access is serialized by the single-threaded UDP receive loop.
     back_buffer: AtomicPtr<u8>,
+    /// [DOD] Size of allocated Pinned RAM. Hard barrier against network overflow.
+    capacity: usize,
     
     // Ownership of the underlying pinned memory
     _buffer_a: PinnedBuffer<u8>,
@@ -25,8 +33,8 @@ pub struct InputSwapchain {
 
 impl InputSwapchain {
     pub fn new(capacity: usize) -> Result<Self> {
-        let mut buffer_a = PinnedBuffer::new(capacity)?;
-        let mut buffer_b = PinnedBuffer::new(capacity)?;
+        let buffer_a = PinnedBuffer::new(capacity)?;
+        let buffer_b = PinnedBuffer::new(capacity)?;
         
         // Ensure buffers are zeroed initially
         unsafe {
@@ -37,33 +45,39 @@ impl InputSwapchain {
         Ok(Self {
             ready_for_gpu: AtomicPtr::new(buffer_a.as_mut_ptr()),
             back_buffer: AtomicPtr::new(buffer_b.as_mut_ptr()),
+            capacity,
             _buffer_a: buffer_a,
             _buffer_b: buffer_b,
         })
     }
 
-    /// Writes the payload into the back buffer and swaps it with the ready buffer.
-    /// This is called by the Tokio thread.
-    pub fn write_incoming(&self, payload: &[u8]) {
-        // 1. Get the current back buffer. 
-        // Relaxation: we are the only writer, so Relaxed is fine for fetching our own ptr.
+    /// Writes the payload into the back buffer at a specific byte offset.
+    /// Does NOT swap the buffer - caller must call .swap() explicitly (e.g. at the end of a tick).
+    pub fn write_incoming_at(&self, offset: usize, payload: &[u8]) {
         let back = self.back_buffer.load(Ordering::Relaxed);
         
-        unsafe {
-            // 2. Zero-copy (direct memcpy) into pinned memory.
-            std::ptr::copy_nonoverlapping(payload.as_ptr(), back, payload.len());
-        }
+        // [DOD] Hard barrier: panic on CPU is 100x better than silent VRAM corruption
+        assert!(
+            offset + payload.len() <= self.capacity,
+            "FATAL DMA BUFFER OVERFLOW: {} bytes at offset {} into buffer of {} bytes",
+            payload.len(), offset, self.capacity
+        );
 
-        // 3. Atomically swap the back buffer with the ready buffer.
-        // Release ordering ensures the memcpy is visible to the Acquire load in the Orchestrator.
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), back.add(offset), payload.len());
+        }
+    }
+
+    /// Atomically swaps the back buffer with the ready buffer.
+    /// Should be called exactly once per simulation tick/batch by the Orchestrator.
+    pub fn swap(&self) {
+        let back = self.back_buffer.load(Ordering::Relaxed);
+        // Release ordering ensures all previous writes to 'back' are visible to the GPU.
         let old_ready = self.ready_for_gpu.swap(back, Ordering::Release);
-        
-        // 4. Update our back buffer pointer for the next packet.
         self.back_buffer.store(old_ready, Ordering::Relaxed);
     }
 
     /// Returns the pointer to the buffer ready for GPU.
-    /// Called by the Day Phase Orchestrator.
     pub fn consume_for_gpu(&self) -> *const u8 {
         self.ready_for_gpu.load(Ordering::Acquire)
     }
@@ -72,23 +86,25 @@ impl InputSwapchain {
 pub struct ExternalIoServer {
     pub is_sleeping: Arc<AtomicBool>,
     pub oversized_skips: AtomicU64,
-    pub swapchain: Arc<InputSwapchain>,
     pub dashboard: Arc<crate::tui::DashboardState>,
     pub routing_table: Arc<RoutingTable>,
     pub socket: Arc<UdpSocket>,
-    pub matrix_offsets: std::collections::HashMap<u32, u32>,
     
-    // Validation hashes
-    pub zone_hash: u32,
-    pub matrix_hash: u32,
+    /// [DOD] Плоский массив контекстов зон. O(N) линейный поиск оптимален для N < 10.
+    pub io_contexts: Vec<(u32, ZoneIoContext)>,
+    
+    // Validation hashes (Deprecated for multi-zone, use io_contexts)
+    // pub zone_hash: u32,
+    // pub matrix_hash: u32,
+
+    // R-STDP Dopamine Modulator (Global Reward Broadcast)
+    pub global_dopamine: Arc<std::sync::atomic::AtomicI32>,
 }
 
 impl ExternalIoServer {
     pub fn new(
         is_sleeping: Arc<AtomicBool>, 
-        capacity: usize,
-        zone_hash: u32,
-        matrix_hash: u32,
+        io_contexts: Vec<(u32, ZoneIoContext)>,
         dashboard: Arc<crate::tui::DashboardState>,
         routing_table: Arc<RoutingTable>,
         socket: Arc<UdpSocket>,
@@ -96,13 +112,11 @@ impl ExternalIoServer {
         Ok(Self {
             is_sleeping,
             oversized_skips: AtomicU64::new(0),
-            swapchain: Arc::new(InputSwapchain::new(capacity)?),
-            zone_hash,
-            matrix_hash,
+            io_contexts,
             dashboard,
             routing_table,
             socket,
-            matrix_offsets: std::collections::HashMap::new(),
+            global_dopamine: Arc::new(std::sync::atomic::AtomicI32::new(0)),
         })
     }
 
@@ -168,10 +182,18 @@ impl ExternalIoServer {
             return;
         }
 
-        // Hash validation
-        if header.zone_hash != self.zone_hash || header.matrix_hash != self.matrix_hash {
-            return;
-        }
+        // [DOD] Zero-Cost Routing (Linear search is optimal for small arrays)
+        // Ищем контекст зоны в плоском массиве, который уже в L1
+        let ctx = match self.io_contexts.iter().find(|(h, _)| *h == header.zone_hash) {
+            Some((_, ctx)) => ctx,
+            None => return, // Drop packet for unknown zone
+        };
+
+        // Проверка матрицы внутри контекста зоны
+        let offset = match ctx.matrix_offsets.get(&header.matrix_hash) {
+            Some(&off) => off as usize,
+            None => return, // Unknown matrix for this zone
+        };
 
         let payload_start = std::mem::size_of::<ExternalIoHeader>();
         let payload_data = &payload[payload_start..];
@@ -180,8 +202,52 @@ impl ExternalIoServer {
             return; // Corrupt size field
         }
 
-        // [Contract §12.3] Lock-Free Zero-Copy Transfer
-        self.swapchain.write_incoming(payload_data);
+        // [Contract §12.3] Lock-Free Zero-Copy Transfer (Personalized per Zone)
+        ctx.swapchain.write_incoming_at(offset, payload_data);
+        // println!("[I/O Server] RX Input for zone 0x{:08X}: {} bytes", header.zone_hash, payload_data.len());
+
+        // Update global dopamine reward for R-STDP
+        self.global_dopamine.store(header.global_reward as i32, Ordering::Relaxed);
+        if header.global_reward != 0 {
+            println!("💉 [Dopamine] Reward Received: {}", header.global_reward);
+        }
+    }
+
+    /// Отправка Output_History (Вызывается оркестратором после RecordReadout)
+    pub async fn send_output_batch(
+        &self, 
+        target_addr: &str, 
+        zone_hash: u32, 
+        matrix_hash: u32, 
+        pinned_output_addr: usize, 
+        output_bytes: usize,
+        tx_buffer: &mut [u8] // [DOD] Переиспользуемый буфер от Caller'а
+    ) {
+        let total_size = std::mem::size_of::<ExternalIoHeader>() + output_bytes;
+        if total_size > 65535 || total_size > tx_buffer.len() {
+            panic!("Output batch exceeds UDP MTU or buffer capacity.");
+        }
+
+        unsafe {
+            let header = tx_buffer.as_mut_ptr() as *mut ExternalIoHeader;
+            (*header).magic = GSOO_MAGIC; // Contract §12
+            (*header).zone_hash = zone_hash;
+            (*header).matrix_hash = matrix_hash;
+            (*header).payload_size = output_bytes as u32;
+            (*header).global_reward = self.global_dopamine.load(Ordering::Relaxed) as i16;
+            (*header)._padding = 0;
+
+            std::ptr::copy_nonoverlapping(
+                pinned_output_addr as *const u8,
+                tx_buffer.as_mut_ptr().add(std::mem::size_of::<ExternalIoHeader>()),
+                output_bytes
+            );
+        }
+
+        let _ = self.socket.send_to(&tx_buffer[..total_size], target_addr).await;
+        // println!("[I/O Server] TX Output for zone 0x{:08X}: {} bytes to {}", zone_hash, output_bytes, target_addr);
+        
+        self.dashboard.udp_out_packets.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Main loop for the UDP Input Server (Port 8081).
@@ -282,54 +348,5 @@ mod tests {
         
         let new_addr: SocketAddr = "2.2.2.2:2222".parse().unwrap();
         assert_eq!(routing_table.get_address(zone_a), Some(new_addr));
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ExternalIoHeaderV2 {
-    pub zone_hash: u64,
-    pub matrix_hash: u64,
-}
-
-pub struct IoMultiplexer;
-
-impl IoMultiplexer {
-    /// Запускает неблокирующий UDP-сервер для приема входных битовых масок
-    pub async fn spawn_input_listener(
-        port: u16,
-        tx: tokio::sync::mpsc::UnboundedSender<(ExternalIoHeaderV2, Vec<u32>)>,
-    ) {
-        let sock = match UdpSocket::bind(("0.0.0.0", port)).await {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                println!("Failed to bind UDP {}: {}", port, e);
-                return; // exit early without panic
-            }
-        };
-        
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65507]; // Максимальный UDP payload
-            loop {
-                if let Ok((size, _addr)) = sock.recv_from(&mut buf).await {
-                    if size < 16 { continue; } // Защита от мусора
-
-                    // Zero-Cost парсинг заголовка
-                    let header: ExternalIoHeaderV2 = *bytemuck::from_bytes(&buf[0..16]);
-                    
-                    // Извлечение payload (Input_Bitmask)
-                    let payload_bytes = &buf[16..size];
-                    
-                    // Защита от невыровненных пакетов
-                    if payload_bytes.len() % 4 != 0 { continue; }
-                    
-                    // Каст без аллокаций. Клонируем в Vec только валидные данные для передачи в канал.
-                    let payload: &[u32] = bytemuck::cast_slice(payload_bytes);
-                    
-                    if tx.send((header, payload.to_vec())).is_err() {
-                        break; // Оркестратор мертв, тушим слушатель
-                    }
-                }
-            }
-        });
     }
 }

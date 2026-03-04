@@ -22,16 +22,20 @@ anatomy = "config/brains/RobotBrain/MotorCortex/anatomy.toml"
 io = "config/brains/RobotBrain/MotorCortex/io.toml"
 baked_dir = "baked/MotorCortex"
 
+# Сенсорно-Ассоциативный тракт (расширяем до 1024 волокон)
 [[connection]]
 from = "SensoryCortex"
 to = "HiddenCortex"
 target_type = "All"
-width = 2
-height = 2
-growth_steps = 100 # Allow lots of growth steps to bridge the gap
+width = 32
+height = 32
+growth_steps = 500
 
+# Ассоциативно-Моторный тракт (включаем UV-проекцию, 1024 волокна)
 [[connection]]
 from = "HiddenCortex"
 to = "MotorCortex"
 target_type = "All"
-growth_steps = 0
+width = 32
+height = 32
+growth_steps = 500

@@ -3,7 +3,6 @@ use crate::{
     hud::SelectionState,
     layout::{AreaBody, EditorType},
     config_editor::LoadedConfig,
-    world::NeuronLayerData,
 };
 
 #[derive(Component)]
@@ -57,7 +56,6 @@ fn update_inspector_ui(
     selection: Res<SelectionState>,
     config: Option<Res<LoadedConfig>>,
     geometry: Option<Res<LoadedGeometry>>,
-    q_layers: Query<&NeuronLayerData>,
     mut q_text: Query<&mut Text, With<InspectorDataBinding>>,
 ) {
     // Встроенный Change Detection Bevy. Если пользователь не кликал, выходим.
@@ -68,22 +66,18 @@ fn update_inspector_ui(
     let Some(blueprints) = &config.blueprints else { return };
     let Ok(mut text) = q_text.get_single_mut() else { return };
 
-    // Берём первый нейрон из выделения (MVP для популяций)
+    // Берём первый нейрон из выделения
     if let Some(&(t_id, l_idx)) = selection.selected_neurons.first() {
-        let mut global_idx = 0;
-        for layer in q_layers.iter() {
-            if layer.type_id == t_id {
-                if let Some(instance) = layer.instances.get(l_idx as usize) {
-                    global_idx = instance.global_idx;
-                }
-                break;
-            }
-        }
+        // В новой унифицированной архитектуре l_idx и есть global_idx
+        let global_idx = l_idx;
 
-        let pos = geometry.0[global_idx as usize];
-        let x = pos[0];
-        let y = pos[1];
-        let z = pos[2];
+        let packed = geometry.0[global_idx as usize];
+        
+        // Unpack according to Spec 03 §1.3
+        let x = (packed & 0x7FFu32) as f32;
+        let y = ((packed >> 11) & 0x7FFu32) as f32;
+        let z = ((packed >> 22) & 0x3Fu32) as f32;
+        let _p_type_id = ((packed >> 28) & 0xFu32) as u8;
 
         // Берем физические параметры из загруженного Blueprint
         let profile = blueprints.neuron_types.get(t_id as usize);

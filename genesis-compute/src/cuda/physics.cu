@@ -31,11 +31,15 @@ struct VariantParameters {
   uint8_t slot_decay_ltm;
   uint8_t slot_decay_wm;
   uint8_t signal_propagation_length;
-  uint8_t _padding[31]; // Дополняем до 64 байт
+  uint8_t ltm_slot_count;
+  uint8_t _pad1[2];          // Выравнивание до 36B
+  int16_t inertia_curve[16]; // 32B — кривая инерции GSOP (16 рангов)
+  uint8_t _pad2[60];         // Дополняем до 128 байт
 };
 
 // Глобальная константная память. Rust будет заливать сюда конфиг перед стартом.
 __constant__ VariantParameters VARIANT_LUT[16];
+extern __constant__ int16_t current_dopamine;
 
 // ============================================================================
 // 1. Inject Inputs Kernel (Virtual Axons)
@@ -187,7 +191,7 @@ __global__ void cu_apply_gsop_kernel(ShardVramPtrs vram, uint32_t padded_n) {
     uint32_t target_packed = vram.dendrite_targets[col_idx];
 
     if (target_packed == 0)
-      continue;
+      break; // Пустые слоты в хвосте
 
     uint32_t target_id = target_packed & 0x00FFFFFF;
     uint32_t seg_idx = target_packed >> 24;
@@ -202,21 +206,35 @@ __global__ void cu_apply_gsop_kernel(ShardVramPtrs vram, uint32_t padded_n) {
     if (abs_w < 0)
       abs_w = -abs_w;
 
-    if (is_active) {
-      abs_w += p.gsop_potentiation;
-    } else {
-      abs_w -= p.gsop_depression;
-    }
+    // 1. Inertia Rank (1 такт, Branchless)
+    uint32_t rank = abs_w >> 11;
+    if (rank > 15)
+      rank = 15;
+    int32_t inertia = p.inertia_curve[rank];
 
-    uint32_t decay = (i < 80) ? p.slot_decay_ltm : p.slot_decay_wm;
-    abs_w -= decay;
+    // 2. Modulated Potentiation / Depression
+    int32_t base_pot = p.gsop_potentiation;
+    int32_t dopa_mod = (base_pot * current_dopamine) >> 8;
+    int32_t final_pot = base_pot + dopa_mod;
 
-    if (abs_w < 0)
-      abs_w = 0;
-    if (abs_w > 32767)
-      abs_w = 32767;
+    int32_t delta_pot = (final_pot * inertia) >> 7;
+    int32_t delta_dep = (p.gsop_depression * inertia) >> 7;
 
-    vram.dendrite_weights[col_idx] = (int16_t)(abs_w * sign);
+    // 3. Causal Delta
+    int32_t delta = is_active ? delta_pot : -delta_dep;
+
+    // 4. Slot Decay (масштабирует дельту, а не вычитается из веса!)
+    int32_t decay = (i < p.ltm_slot_count) ? p.slot_decay_ltm : p.slot_decay_wm;
+    delta = (delta * decay) >> 7;
+
+    // 5. Apply & Clamp
+    int32_t new_abs = abs_w + delta;
+    if (new_abs < 0)
+      new_abs = 0;
+    if (new_abs > 32767)
+      new_abs = 32767;
+
+    vram.dendrite_weights[col_idx] = (int16_t)(new_abs * sign);
   }
 }
 
@@ -232,7 +250,13 @@ __global__ void cu_record_readout_kernel(const uint8_t *soma_flags,
     return;
 
   uint32_t soma_id = mapped_soma_ids[tid];
-  uint8_t is_spiking = soma_flags[soma_id] & 0x01;
+  uint8_t is_spiking = 0;
+
+  // [DOD] Защита от Memory Out-of-Bounds. Сентинел означает пустой пиксель.
+  if (soma_id != 0xFFFFFFFF) {
+    is_spiking = soma_flags[soma_id] & 0x01;
+  }
+
   output_history[tid] = is_spiking;
 }
 

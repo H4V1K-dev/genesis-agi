@@ -8,71 +8,80 @@
 
 **Инвариант:** Полный отказ от объектов (AoS) в памяти GPU. Данные лежат плоскими векторами (SoA) для обеспечения 100% Coalesced Memory Access (32 потока варпа читают непрерывный кусок памяти за одну транзакцию). Все вычисления — исключительно в целых числах (Integer Physics).
 
-### 1.1. Состояние Сомы (Soma State Layout)
+### 1.1. Строгий FFI-Контракт VRAM (Headerless SoA)
 
-Абстрактные переменные и `f32` **запрещены**. Состояние разбито на плоские выровненные массивы. Размер каждого = `N` (количество нейронов шарда), **выровненное паддингом до числа, кратного 32** (Warp Alignment).
+Движок не парсит данные. Бинарные файлы `.state` и `.axons` — это чистые дампы памяти (Headerless), готовые к `cudaMemcpyAsync`.
 
-```rust
-// Структура массивов в VRAM (SoA), Dense Index 0..N-1
-pub struct VramState {
-    // Soma State (padded_n length)
-    voltage: *mut c_void,           // i32 — текущий заряд мембраны
-    threshold_offset: *mut c_void,  // i32 — адаптивный порог гомеостаза
-    refractory_timer: *mut c_void,  // u8 — таймер рефрактерности сомы
-    flags: *mut c_void,             // u8 — битовая карта
+**Размер полезной нагрузки строго детерминирован: 782 байта на нейрон** (с учётом 128 слотов дендритов).
 
-    // Axon State (total_axons length, not padded_n)
-    total_axons: usize,
-    axon_head_index: *mut c_void,  // u32 — головы аксонов
-    soma_to_axon: *mut c_void,     // u32 — маппинг soma_id → axon_id
+**Раскладка `ShardVramPtrs` (порядок байт в .state блобе):**
 
-    // Dendrite Columns (MAX_DENDRITE_SLOTS * padded_n length)
-    dendrite_targets: *mut c_void,     // u32 (packed: [31..10] axon_id | [9..0] segment)
-    dendrite_weights: *mut c_void,     // i16 — синаптические веса
-    dendrite_refractory: *mut c_void,  // u8 — таймеры дендюр преносчивости
+1. **`soma_voltage`**: 4 байта (i32) — текущий заряд мембраны
+2. **`soma_flags`**: 1 байт (u8) — включает 4-битный Type ID
+   - `[7..4]`: Type Mask (Geo | Sign | Variant)
+   - `[3..1]`: Reserved
+   - `[0]`: Is_Spiking (1 = выстрелила в этом тике)
+3. **`threshold_offset`**: 4 байта (i32) — адаптивный порог гомеостаза
+4. **`timers`**: 1 байт (u8) — таймеры рефрактерности сомы и синапсов
+5. **`soma_to_axon`**: 4 байта (u32) — маппинг soma_id → axon_id
+6. **`dendrite_targets`**: 512 байт (u32 × 128) — Columnar Layout
+   - Каждый slot: `[31..8]` Axon_ID (24b) | `[7..0]` Segment_Index (8b)
+7. **`dendrite_weights`**: 256 байт (i16 × 128) — Columnar Layout
+   - Signed: `(+)` = Excitatory, `(-)` = Inhibitory. Знак закрыт при Baking.
 
-    // I/O Matrix (Virtual Axons, InjectInputs)
-    num_pixels: u32,                   // всего виртуальных аксонов
-    map_pixel_to_axon: *mut c_void,    // u32[] — пиксель → врт. аксон_id
-    input_bitmask_buffer: *mut c_void, // u32[] — двоичная маска входов
-    input_matrices: Vec<InputMatrixInfo>, // метаданные по матрицам (офцет, опцион. stride)
+**Итого: 4 + 1 + 4 + 1 + 4 + 512 + 256 = 782 байта/нейрон**
 
-    // Readout Interface (Output)
-    num_mapped_somas: u32,         // кол-во сом (выходы)
-    readout_batch_ticks: u32,      // батч в тиках
-    mapped_soma_ids: *mut c_void,  // u32[] — соми к выводу
-    output_history: *mut c_void,   // u8[batch_ticks × num_somas] — спайки тика
-}
-
-// flags (u8) — битовая карта:
-// [7..4] Type Mask (Geo | Sign | Variant) — экстрактивные 4 бита
-// [3..1] Reserved
-// [0]    Is_Spiking (1 = сома выстрелила в этом тике)
-```
+**Инвариант Выравнивания:** Все массивы имеют длину `padded_n`, кратную 32 (Warp Alignment). Дамп памяти хранится в Little-Endian, без заголовков, без метаданных. Baker гарантирует byte-for-byte совпадение дампа с VRAM layout.
 
 **Извлечение типа за 1 такт ALU:**
 
 ```cuda
-u8  f = flags[tid];                       // 32 байта на варп = 1 сектор L1
+u8  f = flags[tid];                       // 1 байт, 32 байта на варп = 1 сектор L1
 u8  type_mask = f >> 4;                   // 4-бит тип
 u8  sign_bit  = (type_mask >> 1) & 0x1;   // 0 = Excitatory, 1 = Inhibitory
-u8  var_id    = (type_mask >> 2) & 0x3;   // Variant → LUT index
+u8  var_id    = (type_mask >> 2) & 0x3;   // Variant → LUT index в VariantParameters
 ```
 
-### 1.2. Транспонированная Матрица Дендритов (Columnar Layout)
+### 1.2. Константная Память (VariantParameters)
 
-Самое узкое место по памяти — 128 дендритных слотов на сому. Чтобы избежать Warp Divergence и кэш-промахов, они хранятся **поколонно**, а не построчно:
+Параметры мембраны и пластичности загружаются в `__constant__` память GPU один раз при старте.
 
-```rust
-struct DendriteColumns {
-    // 128 массивов. В каждом — данные для ВСЕХ нейронов шарда.
-    // В цикле `for slot in 0..128` варп читает connected_axon_id[slot]
-    // идеально линейно. Bandwidth используется на 100%.
-    connected_axon_id: [*mut u32; 128], // Packed: [31..8] Axon_ID (24b), [7..0] Segment_Index (8b)
-    synapse_weight:    [*mut i16; 128], // Signed: (+) = Excitatory, (-) = Inhibitory. Знак бейкается.
-    refractory_timer:  [*mut u8; 128],  // Локальный таймер невосприимчивости синапса
-}
+**Размер структуры строго 64 байта для идеального попадания в L1 Cache.**
+
+```cpp
+struct VariantParameters {
+    int32_t threshold;                      // 4 б. — Base threshold
+    int32_t rest_potential;                 // 4 б. — Rest potential (GLIF reset)
+    int32_t leak;                           // 4 б. — GLIF Leakage per tick
+    int32_t homeostasis_penalty;            // 4 б. — Penalty on spike
+    int32_t homeostasis_decay;              // 4 б. — Decay per tick
+    uint16_t gsop_potentiation;             // 2 б. — Unsigned delta (sign in weight)
+    uint16_t gsop_depression;               // 2 б. — Unsigned delta
+    uint8_t refractory_period;              // 1 б. — Soma refractory (ticks)
+    uint8_t synapse_refractory_period;      // 1 б. — Synapse refractory (ticks)
+    uint8_t slot_decay_ltm;                 // 1 б. — Множитель GSOP для LTM (0-79). Fixed: 128 = 1.0×
+    uint8_t slot_decay_wm;                  // 1 б. — Множитель GSOP для WM (80-127). Fixed: 128 = 1.0×
+    uint8_t signal_propagation_length;      // 1 б. — Active Tail length
+    uint8_t ltm_slot_count;                 // 1 б. — LTM vs WM threshold boundary
+    uint8_t inertia_curve[16];              // 16 б. — Inertia modifiers (rank: abs(weight) >> 11)
+    uint8_t _padding[14];                   // 14 б. → Total = 64 bytes
+};
+
+// Контейнер для 16 вариантов
+struct GenesisConstantMemory {
+    VariantParameters variants[16];          // 1024 bytes total
+};   // Умещается в константную память GPU (64KB limit)
 ```
+
+**Доступ из CUDA kernel:** Variant ID извлекается из `soma_flags` за 1 такт: `var_id = (flags[tid] >> 6) & 0x3`. Далее — прямое чтение из L1 (Broadcast Read за 1 такт):
+
+```cuda
+int32_t threshold = const_mem.variants[var_id].threshold;
+int32_t rest_potential = const_mem.variants[var_id].rest_potential;
+// и т.д. — все параметры доступны за 1 такт ALU на весь варп
+```
+
+**Инвариант:** Ни один разработчик не должен добавлять поля после `_padding`. Это жёсткий контракт VRAM. Любое расширение требует версионирования структуры и переподготовки Baking Tool.
 
 ### 1.2.1. Аксонные Массивы (Axon State)
 
