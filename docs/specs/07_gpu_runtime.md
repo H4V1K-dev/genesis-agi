@@ -16,20 +16,18 @@
 
 **Раскладка `ShardVramPtrs` (порядок байт в .state блобе):**
 
-1. **`soma_voltage`**: 4 байта (i32) — текущий заряд мембраны
-2. **`soma_flags`**: 1 байт (u8) — включает 4-битный Type ID
-   - `[7..4]`: Type Mask (Geo | Sign | Variant)
-   - `[3..1]`: Reserved
-   - `[0]`: Is_Spiking (1 = выстрелила в этом тике)
-3. **`threshold_offset`**: 4 байта (i32) — адаптивный порог гомеостаза
-4. **`timers`**: 1 байт (u8) — таймеры рефрактерности сомы и синапсов
-5. **`soma_to_axon`**: 4 байта (u32) — маппинг soma_id → axon_id
-6. **`dendrite_targets`**: 512 байт (u32 × 128) — Columnar Layout
-   - Каждый slot: `[31..8]` Axon_ID (24b) | `[7..0]` Segment_Index (8b)
-7. **`dendrite_weights`**: 256 байт (i16 × 128) — Columnar Layout
-   - Signed: `(+)` = Excitatory, `(-)` = Inhibitory. Знак закрыт при Baking.
-
-**Итого: 4 + 1 + 4 + 1 + 4 + 512 + 256 = 782 байта/нейрон**
+// Размеры массивов (N = padded_n, кратно 32):
+//   soma_voltage       [N]     i32   | 4N bytes
+//   soma_flags         [N]     u8    | 1N bytes
+//   threshold_offset   [N]     i32   | 4N bytes
+//   timers             [N]     u8    | 1N bytes
+//   soma_to_axon       [N]     u32   | 4N bytes
+//   dendrite_targets   [128*N] u32   | 512N bytes
+//   dendrite_weights   [128*N] i16   | 256N bytes
+//   dendrite_timers    [128*N] u8    | 128N bytes
+//   [DOD FIX] Burst Architecture
+//   axon_heads         [A]     BurstHeads8 | 32A bytes  (A = total_axons)
+// =============================================================================
 
 **Инвариант Выравнивания:** Все массивы имеют длину `padded_n`, кратную 32 (Warp Alignment). Дамп памяти хранится в Little-Endian, без заголовков, без метаданных. Baker гарантирует byte-for-byte совпадение дампа с VRAM layout.
 
@@ -88,9 +86,23 @@ int32_t rest_potential = const_mem.variants[var_id].rest_potential;
 Размер = `total_axons` (Local + Ghost + Virtual), **не** `padded_n`. Выровнен до кратного 32.
 
 ```rust
+// [DOD] 32-byte alignment гарантирует загрузку 8 голов за 1 транзакцию L1 кэша.
+#[repr(C, align(32))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BurstHeads8 {
+    pub h0: u32,
+    pub h1: u32,
+    pub h2: u32,
+    pub h3: u32,
+    pub h4: u32,
+    pub h5: u32,
+    pub h6: u32,
+    pub h7: u32,
+}
+
 struct AxonState {
-    head_index:    *mut u32,   // PropagateAxons: += v_seg каждый тик.
-    soma_to_axon:  *mut u32,   // Маппинг Dense Soma Index → Axon ID (size = padded_n, Baked)
+    head_index:    *mut BurstHeads8, // PropagateAxons: += v_seg для каждой активной головы
+    soma_to_axon:  *mut u32,         // Маппинг Dense Soma Index → Axon ID
 }
 ```
 

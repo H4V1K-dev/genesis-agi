@@ -64,24 +64,17 @@ sequenceDiagram
 
 ---
 
-### 1.1. Движение: «Поезд» (The Train Model)
+### 1.1. Движение: «Пулеметная очередь» (Burst Train Model)
 
-Сигнал — не точка, а кортеж активных индексов.
+Сигнал — не точка, а пачка импульсов (Burst), скользящая по сегментам аксона.
 
-- **Состояние аксона:** Хранится только `Head_Index` (`u32`).
-- **Константа:** `v_seg` (скорость в сегментах/тик) — рассчитывается при Baking.
-- **Update Loop:** Каждый тик: `Head_Index += v_seg`.
-- **Active Tail:** Сегмент `i` считается активным, если:
+- **Состояние аксона:** Хранится массив из 8 голов `BurstHeads8` (32 байта, 1 кэш-линия).
+- **Константа:** `v_seg` (скорость в сегментах/тик).
+- **Update Loop:** Каждый тик для каждой головы $h_i$: если $h_i \neq AXON\_SENTINEL$, то $h_i \mathrel{+}= v\_seg$.
+- **Active Tail:** Сегмент $i$ считается активным, если он попадает в хвост хотя бы одной из 8 голов:
+  $(h_k - Tail\_Length) \le i \le h_k$
 
-```
-Head - Tail_Length <= i <= Head
-```
-
-> **Инвариант:** `signal_propagation_length ≥ v_seg`.
-> Иначе при `v_seg > propagation_length` между тиками возникают "прыжки", когда сегменты
-> проскакивают мимо хвоста и никогда не попадают в Active Tail — дендриты к ним мертвы.
-
-Это гарантирует, что даже при высокой скорости «поезд» не перепрыгнет дендрит за один тик.
+При новом спайке сомы, регистр голов сдвигается: старейшая голова `h7` стирается, на место `h0` записывается `0`. Это позволяет нейрону стрелять очередями без затирания предыдущих сигналов.
 
 ### 1.2. Инференс: Фильтрация (Inference Pipeline)
 
@@ -137,22 +130,23 @@ __global__ void apply_spike_batch_kernel(u32 num_spikes,
 
 **Constant Memory:** `GenesisConstantMemory` (см. [07_gpu_runtime.md §1.5](./07_gpu_runtime.md)). Содержит array из 16 `VariantParameters` structs (по одному на каждый тип нейрона из blueprints). Variant ID распаковывается из флагов как `(flags >> 4) & 0xF` (биты 4-7 = 16 типов).
 
-### 1.3. Инференс: Пространственный GSOP (ApplyGSOP)
+### 1.3. Инференс: Пространственный GSOP (ApplyGSOP) с экспоненциальным остыванием
 
-Ядро пластичности полностью лишено временных меток и буферов истории. Обучение триггерится **только** в момент генерации спайка сомой.
+Ядро пластичности лишено временных меток. Время вычисляется через пространственную дистанцию `dist = min(h_k - seg_idx)`. 
 
-**Механика Active Tail Check:**
+**Механика Нелинейного STDP (Zero-cost Local Trace):**
 
-Причинно-следственная связь доказывается пространственным пересечением в текущем тике.
+1. **Сома генерирует спайк.** Мы перебираем 128 дендритов.
+2. **Дистанция:** Читаем 32 байта `BurstHeads8`. Находим минимальную положительную дистанцию `dist` среди 8 голов до сегмента дендрита `seg_idx`.
+3. **Остывание (Cooling Shift):** Чем дальше ушла голова, тем слабее связь запоминает совпадение. Вычисляем сдвиг: `cooling_shift = dist >> 4` (каждые 16 тиков сила обучения падает в 2 раза).
+4. **Двухфакторный STDP (Без ветвлений):**
+   - Вычисляем ранг инерции синапса: `rank = abs(weight) >> 11`.
+   - Достаем инерцию: `inertia = p.inertia_curve[rank]`.
+   - Базовая дельта: `delta = (p.gsop_potentiation * inertia) >> 7`.
+   - Применяем экспоненциальное затухание по времени (пространству): `delta >>= cooling_shift`.
+5. **Безопасное применение:** `weight = sign(weight) * clamp(abs(weight) + delta, 0, 32767)`.
 
-1. **Сома генерирует спайк** (`is_spiking == true`).
-2. **Ядро проверяет каждый дендрит:** касается ли он «активного хвоста» (Active Tail) внутри аксона-источника.
-   - Active Tail = сегменты индекса `i`, для которых `(Head - Tail_Length) <= i <= Head`
-   - Проверка: `dist = head - seg_idx < propagation_length`
-3. **Potentiation (Усиление):** Если хвост касается дендрита — сигнал физически пришёл в текущем тике, причинность доказана, вес **увеличивается**.
-4. **Depression (Ослабление):** Если хвоста нет — аксон молчал в момент спайка сомы, вес **уменьшается**.
-
-**Инвариант:** Никаких глобальных массивов `last_spike_time[нейроны]` или `spike_history_ring[тики][спайки]`. Ноль дополнительной памяти. Ноль кэш-промахов из-за несуществующих буферов.
+**Инвариант:** Ноль FPU-операций. Экспоненциальная кривая биологического STDP аппроксимируется через битовые сдвиги (`>>`).
 
 ### 1.4. Zero-Cost Оптимизации
 
@@ -229,19 +223,26 @@ __global__ void update_neurons_kernel(
         u32 target_packed = dendrite_targets[col_idx];
         if (target_packed == 0) break;
 
-        // 5c. Active Tail Overlap Check (u32 overflow легализован)
-        u32 axon_id = target_packed >> 10;    // bits [31..10]
-        u32 seg_idx = target_packed & 0x3FF;  // bits [9..0]
-        u32 head = axon_heads[axon_id];
-        u32 dist = head - seg_idx;
+        // 5c. Branchless Active Tail Check (8 Heads)
+        u32 axon_id = target_packed >> 10;
+        u32 seg_idx = target_packed & 0x3FF;
+        BurstHeads8 h = axon_heads[axon_id]; // 32-byte coalesced read
 
-        if (dist < p.propagation_length) {
-            // 5d. Voltage accumulation (i16→i32, знак запечён)
+        u32 prop = p.signal_propagation_length;
+        bool hit = ((h.h0 - seg_idx) < prop) |
+                   ((h.h1 - seg_idx) < prop) |
+                   ((h.h2 - seg_idx) < prop) |
+                   ((h.h3 - seg_idx) < prop) |
+                   ((h.h4 - seg_idx) < prop) |
+                   ((h.h5 - seg_idx) < prop) |
+                   ((h.h6 - seg_idx) < prop) |
+                   ((h.h7 - seg_idx) < prop);
+
+        if (hit) {
+            // 5d. Voltage accumulation
             i16 w = dendrite_weights[col_idx];
             v += (i32)w;
-
-            // 5e. Timer reset из Constant Memory (1 такт)
-            dendrite_timers[col_idx] = p.synapse_refractory;
+            dendrite_timers[col_idx] = p.synapse_refractory_period;
         }
     }
 
@@ -255,11 +256,14 @@ __global__ void update_neurons_kernel(
     t_off += is_spiking * p.homeostasis_penalty;
     f     = (f & 0xFE) | (u8)is_spiking;
 
-    // 7. Сброс аксона при спайке (Predicated Store)
+    // 7. Сдвиг голов аксона при спайке (Burst Shift)
     if (is_spiking) {
         u32 my_axon = soma_to_axon[tid];
         if (my_axon != 0xFFFFFFFF) {
-            axon_heads[my_axon] = 0;
+            BurstHeads8 h = axon_heads[my_axon];
+            h.h7 = h.h6; h.h6 = h.h5; h.h5 = h.h4; h.h4 = h.h3;
+            h.h3 = h.h2; h.h2 = h.h1; h.h1 = h.h0; h.h0 = 0;
+            axon_heads[my_axon] = h; // 32-byte coalesced write
         }
     }
 
