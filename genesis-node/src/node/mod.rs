@@ -284,7 +284,7 @@ impl NodeRuntime {
             // 5.1 Telemetry Commit (Strictly AFTER GPU Sync to guarantee visibility in Pinned RAM)
             if self.services.telemetry_swapchain.active_clients.load(Ordering::Acquire) > 0 {
                 let count = unsafe { *self.services.telemetry_swapchain.count_buffer.as_ptr() };
-                self.services.telemetry_swapchain.swap_and_ready(count as usize, current_tick as u64);
+                self.services.telemetry_swapchain.swap_and_ready(count as usize, current_tick as u64, current_dopamine);
             }
 
             // [DOD] 6. Inter-Node Fast Path (Egress)

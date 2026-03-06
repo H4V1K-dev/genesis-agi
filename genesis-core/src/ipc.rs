@@ -337,15 +337,16 @@ pub const TELE_MAGIC: u32 = 0x454C4554; // "TELE" in Little-Endian
 
 /// Header for binary telemetry frames sent over WebSocket.
 /// Exactly 16 bytes, repr(C).
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub struct TelemetryFrameHeader {
     pub magic:        u32, // TELE_MAGIC
-    pub tick:         u32, // Simulation tick
+    pub tick:         u64, // Simulation tick
     pub spikes_count: u32, // Number of fired neurons in this frame
-    pub _padding:     u32, // 16-byte alignment
+    pub global_dopamine: i16,
+    pub _pad:         u16,
 }
-const _: () = assert!(std::mem::size_of::<TelemetryFrameHeader>() == 16, "TelemetryFrameHeader must be 16 bytes");
+const _: () = assert!(std::mem::size_of::<TelemetryFrameHeader>() == 20, "TelemetryFrameHeader must be 20 bytes");
 
 /// Magic bytes for inter-zone ghost routing file.
 pub const GHST_MAGIC: u32 = 0x47485354; // "GHST"

@@ -28,6 +28,8 @@ pub struct TelemetrySwapchain {
     pub ready_count: AtomicUsize,
     /// Last tick of the ready buffer.
     pub ready_tick: AtomicUsize,
+    /// Dopamine level when the frame was captured.
+    pub ready_dopamine: std::sync::atomic::AtomicI32,
 
     _buffer_a: PinnedBuffer<u32>,
     _buffer_b: PinnedBuffer<u32>,
@@ -46,18 +48,20 @@ impl TelemetrySwapchain {
             active_clients: AtomicUsize::new(0),
             ready_count: AtomicUsize::new(0),
             ready_tick: AtomicUsize::new(0),
+            ready_dopamine: std::sync::atomic::AtomicI32::new(0),
             _buffer_a: buffer_a,
             _buffer_b: buffer_b,
         })
     }
 
     /// Toggles the buffers. Called by the Orchestrator after a successful DMA copy.
-    pub fn swap_and_ready(&self, count: usize, tick: u64) {
+    pub fn swap_and_ready(&self, count: usize, tick: u64, dopamine: i16) {
         let back = self.back_buffer.load(Ordering::Relaxed);
         
         // Update metadata for the new ready buffer
         self.ready_count.store(count, Ordering::Relaxed);
         self.ready_tick.store(tick as usize, Ordering::Relaxed);
+        self.ready_dopamine.store(dopamine as i32, Ordering::Relaxed);
 
         // Atomic swap: Release ensures the DMA data is visible to the Telemetry thread.
         let old_ready = self.ready_for_export.swap(back, Ordering::Release);
@@ -126,16 +130,21 @@ async fn websocket_stream(mut socket: WebSocket, server: Arc<TelemetryServer>) {
         if current_tick > last_processed_tick {
             let count = server.swapchain.ready_count.load(Ordering::Relaxed);
             let ptr = server.swapchain.ready_for_export.load(Ordering::Acquire);
+            let dopamine = server.swapchain.ready_dopamine.load(Ordering::Relaxed) as i16;
             
             // Binary Frame Packing (Header + Array of u32)
             // [0..4] Magic (b"SPIK")
             // [4..12] Tick (u64, LE)
             // [12..16] Spikes Count (u32, LE)
-            // [16..] Array of u32
-            let mut frame = Vec::with_capacity(16 + count * 4);
+            // [16..18] Dopamine (i16, LE)
+            // [18..20] Padding (u16)
+            // [20..] Array of u32
+            let mut frame = Vec::with_capacity(20 + count * 4);
             frame.extend_from_slice(&TELE_MAGIC.to_le_bytes());
             frame.extend_from_slice(&(current_tick as u64).to_le_bytes());
             frame.extend_from_slice(&(count as u32).to_le_bytes());
+            frame.extend_from_slice(&dopamine.to_le_bytes());
+            frame.extend_from_slice(&0u16.to_le_bytes());
             
             let spikes_slice = unsafe { std::slice::from_raw_parts(ptr, count) };
             let spikes_bytes = bytemuck::cast_slice(spikes_slice);
