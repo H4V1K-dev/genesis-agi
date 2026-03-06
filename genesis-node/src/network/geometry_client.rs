@@ -63,8 +63,9 @@ impl GeometryServer {
         let mut buf = Vec::with_capacity(8 + num_neurons * 4);
         buf.extend_from_slice(b"GEOM"); 
         buf.extend_from_slice(&(num_neurons as u32).to_le_bytes());
-        let data_bytes = bytemuck::cast_slice(&geometry_data);
-        buf.extend_from_slice(data_bytes);
+        for &u in &geometry_data {
+            buf.extend_from_slice(&u.to_le_bytes());
+        }
         let shared_payload = Arc::new(buf);
 
         let slow_path_queues = self.slow_path_queues.clone();
