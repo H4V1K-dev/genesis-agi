@@ -3,10 +3,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use clap::Parser;
 
-use genesis_core::ipc::{
-    shm_name, ShmHeader, ShmState,
-    default_socket_path,
-};
+use genesis_core::ipc::{shm_name, ShmHeader, ShmState, MAX_HANDOVERS_PER_NIGHT, default_socket_path};
 use genesis_core::config::manifest::ZoneManifest;
 use genesis_core::config::blueprints::BlueprintsConfig;
 use genesis_core::constants::MAX_DENDRITE_SLOTS;
@@ -35,6 +32,8 @@ struct NightPhaseContext {
     // [Шаг 4] Геометрия аксонов, загруженная один раз при старте
     /// axon_tips_uvw: Vec<u32> — упакованные Z|Y|X координаты кончиков (по одному на аксон)
     _axon_tips_uvw: Vec<u32>,
+    /// axon_tips_f32: Vec<glam::Vec3> — высокоточный кэш для расчетов в RAM (Phase 46)
+    _axon_tips_f32: Vec<glam::Vec3>,
     /// axon_dirs_xyz: Vec<u32> — упакованные направления (по одному на аксон)
     _axon_dirs_xyz: Vec<u32>,
     /// axon_heads: Vec<genesis_core::layout::BurstHeads8> — состояние аксонных голов (для инициализации новых ghost аксонов)
@@ -52,6 +51,7 @@ struct NightPhaseContext {
     _axon_remaining_steps: Vec<u32>,
 
     _v_seg: u16,
+    _voxel_size_um: f32,
 }
 
 #[derive(Parser)]
@@ -79,14 +79,8 @@ fn main() {
     let padded_n = manifest.memory.padded_n as u32;
     let total_axons = (manifest.memory.virtual_axons + manifest.memory.ghost_capacity + manifest.memory.padded_n) as u32;
 
-    // 2. Вычисляем размер SHM
-    // ShmHeader (64 байта) + Weights (128 * N * 2 байта) + Targets (128 * N * 4 байта) + Handovers
-    let weights_size = padded_n * 128 * 2;
-    let targets_size = padded_n * 128 * 4;
-    // [DOD FIX] Резервируем память под плоский массив Handovers (160 KB)
-    let handovers_size = (genesis_core::ipc::MAX_HANDOVERS_PER_NIGHT * 16) as u32; // 16 bytes per AxonHandoverEvent
-
-    let shm_len = 64 + weights_size + targets_size + handovers_size;
+    // 2. Вычисляем размер SHM через контрактный API (Phase 47)
+    let shm_len = genesis_core::ipc::shm_size(padded_n as usize);
 
     // 3. Создаем POSIX Shared Memory (O_CREAT | O_TRUNC выжигает старые данные)
     let c_name = std::ffi::CString::new(shm_name(cli.zone_hash)).unwrap();
@@ -339,7 +333,13 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
         _master_seed: master_seed,
         _next_ghost_slot_base: padded_n,
         _total_axons_max: total_axons_max,
-        _axon_tips_uvw: axon_tips_uvw,
+        _axon_tips_uvw: axon_tips_uvw.clone(),
+        _axon_tips_f32: axon_tips_uvw.iter().map(|&p| {
+            let vox_x = (p & 0x7FF) as f32;
+            let vox_y = ((p >> 11) & 0x7FF) as f32;
+            let vox_z = ((p >> 22) & 0xFF) as f32;
+            glam::Vec3::new(vox_x, vox_y, vox_z) * manifest.memory.voxel_size_um
+        }).collect(),
         _axon_dirs_xyz: axon_dirs_xyz,
         _axon_heads: axon_heads,
         _soma_to_axon: soma_to_axon,
@@ -348,14 +348,15 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
         _soma_positions: soma_positions,
         _axon_remaining_steps: vec![0; total_axons_max as usize],
         _v_seg: manifest.memory.v_seg,
+        _voxel_size_um: manifest.memory.voxel_size_um,
     })
 }
 
 fn handle_night_phase(
     mut stream: UnixStream,
     _zone_hash: u32,
-    blueprints: Option<&BlueprintsConfig>,
-    ctx: Option<&mut NightPhaseContext>,
+    _blueprints: Option<&BlueprintsConfig>, // blueprints is no longer used directly
+    mut ctx: Option<&mut NightPhaseContext>,
     shm_ptr: *mut u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Read binary BakeRequest (16 bytes)
@@ -394,22 +395,61 @@ fn handle_night_phase(
     };
 
     // 4. CPU Sprouting (Zero-Copy)
-    let empty_cache: &[u8] = &[];
-    let default_masks = [0xFFFF; 16];
-    let (axon_types_cache, whitelist_masks) = if let Some(ref c) = ctx {
-        (c._neuron_types_cache.as_slice(), &c._whitelist_masks)
-    } else {
-        (empty_cache, &default_masks)
-    };
+    // The context `ctx` is now mandatory for sprouting
+    let c = ctx.as_mut().ok_or("NightPhaseContext not available for sprouting")?;
+
+    // [DOD Stage 47.3] Ghost Axon Reclamation (Atomic Wipe)
+    // Runs before Defragmenter so we can "collapse" the holes.
+    let mut current_ghosts_pruned = 0;
+    if hdr.incoming_prunes_count > 0 {
+        println!("   👻 Reclaiming {} ghost axons...", hdr.incoming_prunes_count);
+        let prunes_ptr = unsafe { shm_ptr.add(hdr.prunes_offset as usize) as *const u32 };
+        let count = hdr.incoming_prunes_count as usize;
+        
+        for p_idx in 0..count {
+            let ghost_id = unsafe { *prunes_ptr.add(p_idx) } as usize;
+            if ghost_id < c._axon_heads.len() {
+                // Wipe all synapses that target this ghost
+                // Parallel search is better for N*128, but for now we do it sequentially 
+                // as part of the Ghost Reclamation pass.
+                for slot in 0..128 {
+                    for i in 0..padded_n {
+                        let idx = slot * padded_n + (i as usize);
+                        let target = targets[idx];
+                        // target has axon_id + 1
+                        if (target & 0x00FF_FFFF).saturating_sub(1) == ghost_id as u32 {
+                            targets[idx] = 0;
+                            weights[idx] = 0;
+                        }
+                    }
+                }
+                // Reset axon head
+                c._axon_heads[ghost_id] = genesis_core::layout::BurstHeads8::empty(genesis_core::constants::AXON_SENTINEL);
+                current_ghosts_pruned += 1;
+            }
+        }
+        println!("   ↳ Reclaimed {} ghost axons", current_ghosts_pruned);
+    }
+
+    println!("   🌱 Sprouting new synapses...");
+    let soma_positions_packed = c._soma_positions.iter().map(|&p| PackedPosition(p)).collect::<Vec<_>>();
+    let segment_grid = genesis_baker::bake::spatial_grid::AxonSegmentGrid::build_from_tips(
+        &c._axon_tips_f32,
+        &c._neuron_types_cache,
+        2, // cell_size_vox = 2
+    );
 
     let new_synapses = genesis_baker::bake::sprouting::run_sprouting_pass(
         targets,
         weights,
         padded_n,
-        blueprints,
+        &c._neuron_types,
+        &segment_grid,
+        &soma_positions_packed,
         hdr.epoch,
-        axon_types_cache,
-        whitelist_masks,
+        &c._neuron_types_cache,
+        &c._whitelist_masks,
+        c._voxel_size_um,
     );
 
     println!("   ↳ Sprouted {} new synapses", new_synapses);
@@ -503,9 +543,9 @@ fn handle_night_phase(
         let voxel_size_um = c._sim_config.simulation.voxel_size_um as f32;
         let segment_length_um = c._sim_config.simulation.segment_length_voxels as f32 * voxel_size_um;
         
-        let soma_positions_packed: Vec<PackedPosition> = c._soma_positions.iter().map(|&p| PackedPosition(p)).collect();
-        let search_r = (c._sim_config.simulation.segment_length_voxels as f32 * 3.0).max(1.0) as u32;
-        let spatial_grid = genesis_baker::bake::spatial_grid::SpatialGrid::new(soma_positions_packed, search_r);
+        let soma_positions_packed_nudging: Vec<PackedPosition> = c._soma_positions.iter().map(|&p| PackedPosition(p)).collect();
+        let search_r_nudging = (c._sim_config.simulation.segment_length_voxels as f32 * 3.0).max(1.0) as u32;
+        let spatial_grid_nudging = genesis_baker::bake::spatial_grid::SpatialGrid::new(soma_positions_packed_nudging, search_r_nudging);
 
         for i in 0..padded_n {
             let axon_idx = c._soma_to_axon[i];
@@ -520,14 +560,8 @@ fn handle_night_phase(
             } else { false };
 
             if is_spiking {
-                // Unpack current tip (packed as uvw in _axon_tips_uvw: 11-bit X, 11-bit Y, 8-bit Z)
-                let packed_tip = c._axon_tips_uvw[axon_idx as usize];
-                let current_pos_vox = Vec3::new(
-                    (packed_tip & 0x7FF) as f32,
-                    ((packed_tip >> 11) & 0x7FF) as f32,
-                    ((packed_tip >> 22) & 0xFF) as f32
-                );
-                let current_pos_um = current_pos_vox * voxel_size_um;
+                // [Phase 47.1] Use high-precision micron-based tips directly
+                let current_pos_um = c._axon_tips_f32[axon_idx as usize];
                 
                 let packed_dir = c._axon_dirs_xyz[axon_idx as usize];
                 let forward_dir = Vec3::new(
@@ -557,7 +591,7 @@ fn handle_night_phase(
                         PackedPosition(c._soma_positions[i]),
                         forward_dir,
                         &params,
-                        &spatial_grid,
+                        &spatial_grid_nudging,
                         voxel_size_um
                     );
 
@@ -573,6 +607,7 @@ fn handle_night_phase(
                         voxel_size_um
                     );
                     
+                    c._axon_tips_f32[axon_idx as usize] = next_um;
                     c._axon_tips_uvw[axon_idx as usize] = (next_packed.x() as u32) | ((next_packed.y() as u32) << 11) | ((next_packed.z() as u32) << 22);
                     let new_dir = (next_um - current_pos_um).normalize_or_zero();
                     c._axon_dirs_xyz[axon_idx as usize] = 
@@ -588,13 +623,8 @@ fn handle_night_phase(
         let ghost_base = c._next_ghost_slot_base as usize;
         for ghost_idx in ghost_base..c._axon_heads.len() {
             if c._axon_remaining_steps[ghost_idx] > 0 {
-                let packed_tip = c._axon_tips_uvw[ghost_idx];
-                let current_pos_vox = Vec3::new(
-                    (packed_tip & 0x7FF) as f32,
-                    ((packed_tip >> 11) & 0x7FF) as f32,
-                    ((packed_tip >> 22) & 0xFF) as f32
-                );
-                let current_pos_um = current_pos_vox * voxel_size_um;
+                // [Phase 47.1] Use high-precision micron-based tips directly
+                let current_pos_um = c._axon_tips_f32[ghost_idx];
                 
                 let packed_dir = c._axon_dirs_xyz[ghost_idx];
                 let forward_dir = Vec3::new(
@@ -617,6 +647,7 @@ fn handle_night_phase(
                     voxel_size_um
                 );
                 
+                c._axon_tips_f32[ghost_idx] = next_um;
                 c._axon_tips_uvw[ghost_idx] = (next_packed.x() as u32) | ((next_packed.y() as u32) << 11) | ((next_packed.z() as u32) << 22);
                 let new_dir = (next_um - current_pos_um).normalize_or_zero();
                 c._axon_dirs_xyz[ghost_idx] = 
@@ -627,6 +658,102 @@ fn handle_night_phase(
                 c._axon_remaining_steps[ghost_idx] -= 1;
             }
         }
+
+        // [DOD Stage 46.3] Rebuild Grid from updated tips
+        println!("   🕸️  Rebuilding AxonSegmentGrid from high-precision tips...");
+        let _segment_grid_pruning = genesis_baker::bake::spatial_grid::AxonSegmentGrid::build_from_tips(
+            &c._axon_tips_f32,
+            &c._neuron_types_cache,
+            2, // cell_size_vox = 2
+        );
+
+        // [DOD Stage 46.1] Parallel Spatial Pruning
+        println!("   ✂️  Spatial Pruning (dist > radius)...");
+        // ... (existing parallel pruning code stays here) ...
+
+        // [DOD Stage 47.2] Distributed GC: Detect dead local axons
+        println!("   🔭 Detecting dead local axons...");
+        let prunes_off = hdr.handovers_offset as usize + (MAX_HANDOVERS_PER_NIGHT * 16);
+        hdr.prunes_offset = prunes_off as u32;
+        let prunes_ptr = unsafe { shm_ptr.add(prunes_off) as *mut u32 };
+        
+        let mut dead_count = 0;
+        // Search only local axons (0..padded_n)
+        for axon_id in 0..padded_n {
+            // Check if ANY synapse in the WHOLE matrix targets this axon_id
+            let mut is_alive = false;
+            for slot in 0..128 {
+                for i in 0..padded_n {
+                    let idx = slot * padded_n + i;
+                    if (targets[idx] & 0x00FF_FFFF).saturating_sub(1) == axon_id as u32 {
+                        is_alive = true;
+                        break;
+                    }
+                }
+                if is_alive { break; }
+            }
+            
+            if !is_alive {
+                // Check if it's a "virtual" home-less axon or if it's really local
+                // Local axons have an owner soma.
+                if axon_id < c._axon_heads.len() && !c._axon_heads[axon_id].is_empty(genesis_core::constants::AXON_SENTINEL) {
+                    if dead_count < MAX_HANDOVERS_PER_NIGHT {
+                        unsafe { *prunes_ptr.add(dead_count) = axon_id as u32; }
+                        dead_count += 1;
+                    }
+                }
+            }
+        }
+        hdr.prunes_count = dead_count as u32;
+        println!("   ↳ Found {} dead local axons for reclamation", dead_count);
+
+        // [DOD Stage 46.1] Parallel Spatial Pruning
+        println!("   ✂️  Spatial Pruning (dist > radius)...");
+        let t_ptr = targets.as_mut_ptr() as usize;
+        let w_ptr = weights.as_mut_ptr() as usize;
+        let axon_tips_ptr = c._axon_tips_f32.as_ptr() as usize;
+        let soma_pos_ptr = c._soma_positions.as_ptr() as usize;
+        
+        // Convert neuron types to a simple slice of radii for parallel access
+        let radii: Vec<f32> = c._neuron_types.iter().map(|nt| nt.dendrite_radius_um).collect();
+        let radii_ptr = radii.as_ptr() as usize;
+
+        (0..padded_n).into_par_iter().for_each(|i| {
+            let targets_raw = t_ptr as *mut u32;
+            let weights_raw = w_ptr as *mut i16;
+            let tips_raw = axon_tips_ptr as *const glam::Vec3;
+            let somas_raw = soma_pos_ptr as *const u32;
+            let radii_raw = radii_ptr as *const f32;
+
+            let my_pos_packed = unsafe { *somas_raw.add(i) };
+            if my_pos_packed == 0 { return; }
+            
+            let my_type_id = (my_pos_packed >> 28) as usize;
+            let my_radius = unsafe { *radii_raw.add(my_type_id % 16) };
+            let my_soma_f32 = glam::Vec3::new(
+                (my_pos_packed & 0x7FF) as f32 * voxel_size_um,
+                ((my_pos_packed >> 11) & 0x7FF) as f32 * voxel_size_um,
+                ((my_pos_packed >> 22) & 0x3F) as f32 * voxel_size_um
+            );
+
+            for slot in 0..128 {
+                let col_idx = slot * padded_n + i;
+                let target = unsafe { *targets_raw.add(col_idx) };
+                if target == 0 { continue; }
+
+                let axon_id = (target & 0x00FF_FFFF).saturating_sub(1) as usize;
+                // [Phase 47.1] _axon_tips_f32 is already in MICRONS.
+                let tip_um = unsafe { *tips_raw.add(axon_id) };
+                
+                let dist = (my_soma_f32 - tip_um).length();
+                if dist > my_radius {
+                    unsafe {
+                        *targets_raw.add(col_idx) = 0;
+                        *weights_raw.add(col_idx) = 0;
+                    }
+                }
+            }
+        });
 
         // 7. Persistence (Dump to Disk)
         println!("   💾 Dumping updated shard state to disk...");

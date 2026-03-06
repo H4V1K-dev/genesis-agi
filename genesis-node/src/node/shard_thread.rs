@@ -23,6 +23,7 @@ pub struct ShardDescriptor {
     pub config: InstanceConfig,
     pub v_seg: u32,
     pub incoming_grow: Arc<crossbeam::queue::SegQueue<AxonHandoverEvent>>,
+    pub incoming_prune: Arc<crossbeam::queue::SegQueue<crate::network::slow_path::AxonHandoverPrune>>,
 }
 
 /// [Phase 23] Shared orchestrator resources — cheap Clone via Arc.
@@ -239,6 +240,7 @@ fn execute_night_phase(
     rt_handle: &tokio::runtime::Handle,
     workspace: &mut ThreadWorkspace,
     baked_dir: &std::path::Path,
+    incoming_prune: &Arc<crossbeam::queue::SegQueue<crate::network::slow_path::AxonHandoverPrune>>,
 ) {
     let padded_n = shard.vram.padded_n as usize;
     let dendrites_count = padded_n * genesis_core::constants::MAX_DENDRITE_SLOTS;
@@ -291,11 +293,20 @@ fn execute_night_phase(
             }
         }
 
+        let mut incoming_prunes = Vec::new();
+        while let Some(prune) = incoming_prune.pop() { 
+            incoming_prunes.push(prune.ghost_id);
+            if incoming_prunes.len() >= genesis_core::ipc::MAX_HANDOVERS_PER_NIGHT {
+                break;
+            }
+        }
+
         match client.run_night(
             &incoming_handovers,
+            &incoming_prunes,
             padded_n,
             std::time::Duration::from_secs(10),
-            0, // [DOD FIX] run_night is still expected to receive prune_threshold, we mock 0
+            0, 
         ) {
             Ok(()) => {
                 unsafe {
@@ -324,6 +335,7 @@ fn execute_night_phase(
                 }
 
                 dispatch_handovers(client, shard_config, rt_handle);
+                dispatch_prunes(client, shard_config, rt_handle);
                 // println!("🌅 [Shard {:08X}] Night Phase complete. Waking up.", hash);
             }
             Err(e) => {
@@ -417,6 +429,46 @@ fn dispatch_handovers(
                 let _ = crate::network::geometry_client::send_geometry_request(addr, &req).await;
             }
         });
+    }
+}
+
+#[inline(always)]
+fn dispatch_prunes(
+    client: &crate::ipc::BakerClient,
+    _shard_config: &InstanceConfig,
+    rt_handle: &tokio::runtime::Handle,
+) {
+    let shm_hdr = unsafe { std::ptr::read(client.shm_ptr as *const genesis_core::ipc::ShmHeader) };
+    if shm_hdr.prunes_count == 0 { return; }
+
+    let prunes_slice = unsafe {
+        std::slice::from_raw_parts(
+            client.shm_ptr.add(shm_hdr.prunes_offset as usize) as *const u32,
+            shm_hdr.prunes_count as usize,
+        )
+    };
+
+    // [Stage 47.2] Prunes are sent to ALL neighbors because we don't track 
+    // which neighbor has which ghost for a local axon (Routing is dynamic).
+    let mut targets = Vec::new();
+    if let Some(ref addr) = _shard_config.neighbors.x_plus { targets.push(addr.clone()); }
+    if let Some(ref addr) = _shard_config.neighbors.x_minus { targets.push(addr.clone()); }
+    if let Some(ref addr) = _shard_config.neighbors.y_plus { targets.push(addr.clone()); }
+    if let Some(ref addr) = _shard_config.neighbors.y_minus { targets.push(addr.clone()); }
+    if let Some(ref addr) = _shard_config.neighbors.z_plus { targets.push(addr.clone()); }
+    if let Some(ref addr) = _shard_config.neighbors.z_minus { targets.push(addr.clone()); }
+
+    for axon_id in prunes_slice {
+        let axon_id = *axon_id;
+        for addr_str in &targets {
+            let addr_str = addr_str.clone();
+            rt_handle.spawn(async move {
+                if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+                    let req = crate::network::slow_path::GeometryRequest::Prune(axon_id);
+                    let _ = crate::network::geometry_client::send_geometry_request(addr, &req).await;
+                }
+            });
+        }
     }
 }
 
@@ -544,6 +596,7 @@ pub fn spawn_shard_thread(
                             execute_night_phase(
                                 &mut desc.engine, hash, std::path::Path::new(&socket_path), &mut baker_client,
                                 &ctx.incoming_grow, &desc.config, &ctx.rt_handle, &mut workspace, &desc.baked_dir,
+                                &desc.incoming_prune,
                             );
                         }
 

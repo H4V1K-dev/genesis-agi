@@ -234,8 +234,9 @@ fn serialize_artifacts(
         memory: genesis_core::config::manifest::ManifestMemory {
             padded_n: shard.soma_to_axon.len(),
             virtual_axons: num_virtual,
-            ghost_capacity: workspace.ghost_capacity, // Expected usize if manifest changed, or cast if u32 required. Error said expected usize, found u32.
+            ghost_capacity: workspace.ghost_capacity, 
             v_seg: v_seg as u16,
+            voxel_size_um: workspace.sim.simulation.voxel_size_um,
         },
         network: genesis_core::config::manifest::ManifestNetwork {
             slow_path_tcp: 8010 + workspace.zone_idx * 10,

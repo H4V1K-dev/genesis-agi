@@ -36,7 +36,6 @@ pub fn voxel_dist(ax: u32, ay: u32, az: u32, bx: u32, by: u32, bz: u32) -> f32 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-use genesis_core::config::blueprints::BlueprintsConfig;
 use genesis_core::layout::pack_dendrite_target;
 use genesis_core::constants::MAX_DENDRITE_SLOTS;
 
@@ -46,73 +45,63 @@ pub fn run_sprouting_pass(
     targets: &mut [u32],
     weights: &mut [i16],
     padded_n: usize,
-    blueprints: Option<&BlueprintsConfig>,
+    types: &[NeuronType],
+    grid: &crate::bake::spatial_grid::AxonSegmentGrid,
+    positions: &[genesis_core::types::PackedPosition],
     epoch: u64,
-    axon_types: &[u8],
+    _axon_types: &[u8],
     whitelist_masks: &[u16; 16],
+    voxel_size_um: f32,
 ) -> usize {
     let mut new_synapses = 0;
 
-    // Собираем список занятых аксонов (target != 0) для случайного выбора
-    let occupied: Vec<u32> = targets.iter()
-        .filter(|&&t| t != 0)
-        .copied()
-        .collect();
 
-    if occupied.is_empty() {
-        return 0; // Никаких существующих связей для анализа
-    }
 
     for i in 0..padded_n {
+        let my_pos = positions[i];
+        if my_pos.0 == 0 { continue; }
+        
+        let my_type_id = my_pos.type_id() as usize;
+        let my_type = &types[my_type_id];
+        let radius_vox = (my_type.dendrite_radius_um / voxel_size_um).ceil() as u32; 
+
         for slot in (0..MAX_DENDRITE_SLOTS).rev() {
             let col_idx = slot * padded_n + i;
             if targets[col_idx] != 0 {
-                break; // Слот занят — список сортирован по убыванию силы
+                break;
             }
 
-            // Детерминированный выбор кандидата из занятых аксонов
             let salt = (i as u32).wrapping_add(slot as u32).wrapping_add(1);
             let hash = fnv1a(epoch, salt);
-            let candidate_idx = (hash % occupied.len() as u64) as usize;
-            let candidate_packed = occupied[candidate_idx];
+            
+            if let Some(seg_ref) = grid.get_random_candidate(my_pos.x() as u32, my_pos.y() as u32, my_pos.z() as u32, radius_vox, hash) {
+                let candidate_axon_id = seg_ref.axon_id;
+                
+                // Self-exclusion
+                // We'd need soma_to_axon or similar here, but for now we skip self-check in run_sprouting_pass 
+                // as it's a "quick" pass. Refinement:
+                // if candidate_axon_id == i as u32 { continue; }
 
-            // Распаковываем axon_id из существующего target (отменяем +1 Zero-Index смещение)
-            let candidate_axon_id = (candidate_packed & 0x00FF_FFFF).saturating_sub(1);
+                let target_type_id = seg_ref.type_idx as usize;
+                
+                // Whitelist Filter
+                let mask = whitelist_masks[(my_type_id % 16) as usize];
+                if mask != 0xFFFF && (mask & (1 << (target_type_id % 16))) == 0 {
+                    continue;
+                }
 
-            // [Phase 41.3] Типы и фильтрация
-            let owner_type_id = if axon_types.len() > i { axon_types[i] } else { 0 };
-            let target_type_id = if axon_types.len() > candidate_axon_id as usize {
-                axon_types[candidate_axon_id as usize]
-            } else {
-                0
-            };
+                let new_target = pack_dendrite_target(candidate_axon_id, seg_ref.seg_idx as u32);
+                
+                // [DOD Stage 46.3] Dale's Law from AXON OWNER
+                let owner_type = &types[target_type_id % types.len()];
+                let abs_w = owner_type.initial_synapse_weight as i16;
+                let final_weight = if owner_type.is_inhibitory { -abs_w } else { abs_w };
 
-            // Hard Filter via Bitmask
-            let mask = whitelist_masks[(owner_type_id % 16) as usize];
-            if mask != 0xFFFF && (mask & (1 << (target_type_id % 16))) == 0 {
-                continue; // Cannot connect due to whitelist restrictions
+                targets[col_idx] = new_target;
+                weights[col_idx] = final_weight;
+                new_synapses += 1;
+                break;
             }
-
-            // [DOD FIX 1] Правильная упаковка через контрактный API
-            let new_target = pack_dendrite_target(candidate_axon_id, 0);
-
-            // [DOD FIX 2] Закон Дейла — знак веса из type_id аксона
-            let src_weight = weights[candidate_idx % (padded_n * MAX_DENDRITE_SLOTS)];
-            let is_inhibitory_src = src_weight < 0;
-
-            let final_weight = if let Some(bp) = blueprints {
-                let abs_w = if let Some(nt) = bp.neuron_types.first() {
-                    nt.initial_synapse_weight as i16
-                } else { 74 };
-                if is_inhibitory_src { -abs_w } else { abs_w }
-            } else {
-                if is_inhibitory_src { -74_i16 } else { 74_i16 }
-            };
-
-            targets[col_idx] = new_target;
-            weights[col_idx] = final_weight;
-            new_synapses += 1;
-            break;
         }
     }
 

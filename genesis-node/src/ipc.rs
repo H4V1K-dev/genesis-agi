@@ -101,6 +101,7 @@ impl BakerClient {
     pub fn run_night(
         &mut self,
         handovers: &[genesis_core::ipc::AxonHandoverEvent],
+        incoming_prunes: &[u32],
         _padded_n: usize,
         timeout: Duration,
         prune_threshold: i16,
@@ -117,6 +118,12 @@ impl BakerClient {
             // Прямое копирование из RAM в SHM, видимую демоном (DMA-style)
             std::ptr::copy_nonoverlapping(handovers.as_ptr(), dest, handovers.len());
             (*hdr_ptr).handovers_count = handovers.len() as u32;
+
+            // [DOD Stage 47.3] Write incoming prunes (Ghost Axon Death)
+            let prunes_off = (hdr_ptr as *mut u8).add((*hdr_ptr).handovers_offset as usize + (genesis_core::ipc::MAX_HANDOVERS_PER_NIGHT * 16)) as *mut u32;
+            (*hdr_ptr).prunes_offset = ((*hdr_ptr).handovers_offset as usize + (genesis_core::ipc::MAX_HANDOVERS_PER_NIGHT * 16)) as u32;
+            std::ptr::copy_nonoverlapping(incoming_prunes.as_ptr(), prunes_off, incoming_prunes.len());
+            (*hdr_ptr).incoming_prunes_count = incoming_prunes.len() as u32;
         }
 
         // ── 2. Binary Trigger (16 bytes) - Fast Path ──

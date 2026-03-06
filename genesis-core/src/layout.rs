@@ -51,6 +51,11 @@ impl BurstHeads8 {
             h4: sentinel, h5: sentinel, h6: sentinel, h7: sentinel,
         }
     }
+
+    pub fn is_empty(&self, sentinel: u32) -> bool {
+        self.h0 == sentinel && self.h1 == sentinel && self.h2 == sentinel && self.h3 == sentinel &&
+        self.h4 == sentinel && self.h5 == sentinel && self.h6 == sentinel && self.h7 == sentinel
+    }
 }
 
 const _: () = assert!(std::mem::size_of::<BurstHeads8>() == 32);

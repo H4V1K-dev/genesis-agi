@@ -91,7 +91,7 @@ impl Bootloader {
         let night_interval = sim_config.simulation.night_interval_ticks as u64;
 
         // 2. Hardware & VRAM Phase: Allocate weights/targets and flash physics laws
-        let (shards, s2a_maps, axon_head_ptrs, io_contexts, all_geo_data, output_routes) = 
+        let (mut shards, s2a_maps, axon_head_ptrs, io_contexts, all_geo_data, output_routes) = 
             Self::load_shards_into_vram(&zone_manifest, root_dir)?;
 
         let first_manifest = zone_manifest.clone();
@@ -126,8 +126,15 @@ impl Bootloader {
         let routing_table = Arc::new(RoutingTable::new(initial_routes));
 
         // 4. Network Setup: IO, Geometry, and Telemetry servers
+        let queues = Arc::new(crate::network::slow_path::SlowPathQueues::new());
+        // Link first shard to these queues (MVP: one node = one set of queues for now)
+        if let Some(shard) = shards.get_mut(0) {
+            shard.incoming_grow = queues.incoming_grow.clone();
+            shard.incoming_prune = queues.incoming_prune.clone();
+        }
+
         let (io_server, geometry_server, telemetry_swapchain, egress_pool, inter_node_router) = 
-            Self::setup_networking(&first_manifest, io_contexts, routing_table.clone()).await?;
+            Self::setup_networking(&first_manifest, io_contexts, routing_table.clone(), queues).await?;
 
         // 5. Orchestrator Assembly: Glue everything into NodeRuntime
         let bsp_barrier = Arc::new(BspBarrier::new(sim_config.simulation.sync_batch_ticks as usize, expected_peers));
@@ -319,7 +326,8 @@ impl Bootloader {
             baked_dir,
             config: instance_config,
             v_seg,
-            incoming_grow,
+            incoming_grow: incoming_grow.clone(),
+            incoming_prune: Arc::new(SegQueue::new()), // Each shard gets its own prune queue
         });
         io_contexts.push((zone_hash, io_ctx));
 
@@ -396,7 +404,8 @@ impl Bootloader {
     async fn setup_networking(
         first_manifest: &ZoneManifest,
         io_contexts: Vec<(u32, crate::network::io_server::ZoneIoContext)>,
-        routing_table: Arc<RoutingTable>
+        routing_table: Arc<RoutingTable>,
+        queues: Arc<crate::network::slow_path::SlowPathQueues>,
     ) -> Result<(Arc<ExternalIoServer>, GeometryServer, Arc<crate::network::telemetry::TelemetrySwapchain>, Arc<crate::network::egress::EgressPool>, Arc<crate::network::inter_node::InterNodeRouter>)> {
         let local_port = first_manifest.network.fast_path_udp_local;
 
@@ -409,7 +418,7 @@ impl Bootloader {
         )?);
 
         let geo_addr = format!("0.0.0.0:{}", local_port + 1).parse()?;
-        let geometry_server = GeometryServer::bind(geo_addr).await?;
+        let geometry_server = GeometryServer::bind(geo_addr, queues).await?;
         let telemetry_swapchain = TelemetryServer::start(local_port + 2).await;
 
         let egress_socket = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await?);

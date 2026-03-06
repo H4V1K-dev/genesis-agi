@@ -18,7 +18,7 @@
 pub const SHM_MAGIC: u32 = 0x47454E53; // "GENS"
 
 /// IPC protocol version. Bump on incompatible ShmHeader changes.
-pub const SHM_VERSION: u8 = 1;
+pub const SHM_VERSION: u8 = 2;
 
 pub const MAX_HANDOVERS_PER_NIGHT: usize = 10_000;
 
@@ -56,8 +56,9 @@ pub const fn shm_size(padded_n: usize) -> usize {
     let weights_bytes = padded_n * 128 * 2;
     let targets_bytes = padded_n * 128 * 4;
     let handovers_bytes = MAX_HANDOVERS_PER_NIGHT * 16;
+    let prunes_bytes = MAX_HANDOVERS_PER_NIGHT * 4; // u32 pruned_axon_ids
     let flags_bytes = padded_n;
-    64 + weights_bytes + targets_bytes + handovers_bytes + flags_bytes
+    64 + weights_bytes + targets_bytes + handovers_bytes + prunes_bytes + flags_bytes
 }
 
 #[repr(C)]
@@ -77,7 +78,9 @@ pub struct ShmHeader {
     pub handovers_count: u32,   // 40..44
     pub zone_hash: u32,         // 44..48 [DOD FIX: Уникальный ID]
     pub flags_offset: u32,      // 48..52
-    pub _padding: [u8; 12],     // 52..64 (Выравнивание кэш-линии)
+    pub prunes_offset: u32,     // 52..56 (Outgoing: Baker -> Node)
+    pub prunes_count: u32,      // 56..60
+    pub incoming_prunes_count: u32, // 60..64 (Incoming: Node -> Baker)
 }
 
 
@@ -106,7 +109,9 @@ impl ShmHeader {
             handovers_count: 0,
             zone_hash,
             flags_offset: 0,
-            _padding: [0; 12],
+            prunes_offset: 0,
+            prunes_count: 0,
+            incoming_prunes_count: 0,
         }
     }
 

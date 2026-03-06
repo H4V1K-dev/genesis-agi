@@ -123,6 +123,7 @@ pub struct ManifestMemory {
     pub virtual_axons: usize,
     pub ghost_capacity: usize,
     pub v_seg: u16,
+    pub voxel_size_um: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

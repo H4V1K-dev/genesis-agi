@@ -47,11 +47,11 @@ pub struct GeometryServer {
 }
 
 impl GeometryServer {
-    pub async fn bind(addr: SocketAddr) -> Result<Self> {
+    pub async fn bind(addr: SocketAddr, slow_path_queues: Arc<SlowPathQueues>) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         Ok(Self { 
             listener,
-            slow_path_queues: Arc::new(SlowPathQueues::new()),
+            slow_path_queues,
         })
     }
 
@@ -104,7 +104,12 @@ impl GeometryServer {
                                     queues.incoming_grow.push(ev);
                                 }
                             }
-                            GeometryRequest::Prune(_) => {}
+                            GeometryRequest::Prune(axon_id) => {
+                                queues.incoming_prune.push(crate::network::slow_path::AxonHandoverPrune {
+                                    magic: 0x44454144, // "DEAD"
+                                    ghost_id: axon_id,
+                                });
+                            }
                         }
 
                         // Send Ack

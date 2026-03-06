@@ -96,6 +96,57 @@ pub struct AxonSegmentGrid {
 }
 
 impl AxonSegmentGrid {
+    pub fn build_from_tips(tips_f32: &[glam::Vec3], types_cache: &[u8], cell_size_voxels: u32) -> Self {
+        let cell_size = cell_size_voxels.max(1);
+        let mut cells: HashMap<u64, Vec<SegmentRef>> = HashMap::with_capacity(tips_f32.len() / 10 + 1);
+        
+        for (axon_id, &pos) in tips_f32.iter().enumerate() {
+            let type_idx = if types_cache.len() > axon_id { types_cache[axon_id] } else { 0 };
+            let cx = (pos.x as u32) / cell_size;
+            let cy = (pos.y as u32) / cell_size;
+            let cz = (pos.z as u32) / cell_size;
+            
+            let hash = SpatialGrid::hash_cell(cx, cy, cz);
+            cells.entry(hash).or_default().push(SegmentRef {
+                axon_id: axon_id as u32,
+                seg_idx: 0, // Tip is always segment 0 for nudging purposes
+                type_idx,
+            });
+        }
+        
+        Self {
+            cell_size,
+            cells,
+        }
+    }
+
+    pub fn get_random_candidate(&self, x: u32, y: u32, z: u32, radius_vox: u32, seed: u64) -> Option<SegmentRef> {
+        let radius_cells = (radius_vox as f32 / self.cell_size as f32).ceil() as i32;
+        let mut candidates = Vec::new();
+        
+        let cx = x / self.cell_size;
+        let cy = y / self.cell_size;
+        let cz = z / self.cell_size;
+
+        for dz in -radius_cells..=radius_cells {
+            for dy in -radius_cells..=radius_cells {
+                for dx in -radius_cells..=radius_cells {
+                    let rx = (cx as i32 + dx) as u32;
+                    let ry = (cy as i32 + dy) as u32;
+                    let rz = (cz as i32 + dz) as u32;
+                    let hash = SpatialGrid::hash_cell(rx, ry, rz);
+                    if let Some(refs) = self.cells.get(&hash) {
+                        candidates.extend_from_slice(refs);
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() { return None; }
+        let idx = (seed % candidates.len() as u64) as usize;
+        Some(candidates[idx])
+    }
+
     pub fn build_from_axons(axons: &[GrownAxon], cell_size_voxels: u32) -> Self {
         let cell_size = cell_size_voxels.max(1);
         let est_segs: usize = axons.iter().map(|a| a.segments.len()).sum();
