@@ -1,30 +1,27 @@
 /// genesis-runtime IPC client — communicates with genesis-baker-daemon.
 ///
 /// Transport:
-///   - Data:    POSIX SHM `/genesis_shard_{zone_hash:08X}` (mmap, no copies)
-///   - Control: Unix domain socket (JSON-line, single command per Night Phase)
+///   - Data:    File-backed mmap (cross-platform)
+///   - Control: Unix socket (Linux) / TCP (Windows)
 ///
 /// Usage:
 ///   1. Call `BakerClient::connect(zone_hash, socket_path)` at startup.
 ///   2. Call `run_night(weights, targets, padded_n, timeout)` during Night Phase.
 ///   3. Returns updated targets (with sprouted connections filled in).
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use genesis_core::ipc::{shm_name, shm_size, ShmHeader, ShmState};
-
-// POSIX SHM wrappers (libc calls)
-use std::ffi::CString;
+use genesis_core::ipc::{shm_file_path, shm_size, ShmHeader, ShmState};
 
 /// Runtime-side IPC client for the baker daemon.
 pub struct BakerClient {
     zone_hash: u32,
-    socket_path: std::path::PathBuf,
+    socket_addr: String,
     pub shm_ptr: *mut u8,
     pub shm_len: usize,
+    _mmap: memmap2::MmapMut,
 }
 
 // SAFETY: BakerClient is not Send/Sync by default due to raw pointer.
@@ -34,66 +31,44 @@ unsafe impl Send for BakerClient {}
 unsafe impl Sync for BakerClient {}
 
 impl BakerClient {
-    /// Open and mmap the SHM segment, then validate the header written by daemon.
+    /// Open and mmap the SHM file, then validate the header written by daemon.
     /// The daemon must already be running and have created the SHM before this is called.
     pub fn connect(zone_hash: u32, socket_path: &Path) -> Result<Self> {
-        let name = shm_name(zone_hash);
-        let c_name = CString::new(name.as_str()).unwrap();
+        let shm_path = shm_file_path(zone_hash);
 
-        // Open existing SHM segment (daemon creates it at startup)
-        let fd = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDWR, 0o600) };
-        if fd < 0 {
-            bail!(
-                "shm_open({}) failed: {}",
-                name,
-                std::io::Error::last_os_error()
-            );
-        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&shm_path)
+            .with_context(|| format!("Cannot open SHM file {:?}", shm_path))?;
 
-        // Read header to learn the real size
         let header_size = std::mem::size_of::<ShmHeader>();
-        let mut hdr = std::mem::MaybeUninit::<ShmHeader>::uninit();
-        let n = unsafe { libc::read(fd, hdr.as_mut_ptr() as *mut _, header_size) };
-        if n < header_size as isize {
-            unsafe { libc::close(fd) };
-            bail!("SHM too small to read header");
+        let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
+
+        if mmap.len() < header_size {
+            bail!("SHM file too small");
         }
-        let hdr = unsafe { hdr.assume_init() };
+
+        let hdr = unsafe { std::ptr::read(mmap.as_ptr() as *const ShmHeader) };
         hdr.validate()
             .map_err(|e| anyhow::anyhow!("SHM header invalid: {e}"))?;
 
         let shm_len = shm_size(hdr.padded_n as usize);
-
-        // Map the full segment
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                shm_len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        unsafe { libc::close(fd) };
-
-        if ptr == libc::MAP_FAILED {
-            bail!("mmap failed: {}", std::io::Error::last_os_error());
+        if mmap.len() < shm_len {
+            bail!("SHM file size {} < expected {}", mmap.len(), shm_len);
         }
+
+        let socket_addr = socket_path.to_string_lossy().into_owned();
 
         Ok(Self {
             zone_hash,
-            socket_path: socket_path.to_path_buf(),
-            shm_ptr: ptr as *mut u8,
+            socket_addr,
+            shm_ptr: mmap.as_mut_ptr(),
             shm_len,
+            _mmap: mmap,
         })
     }
 
-    /// Run one Night Phase Sprouting cycle:
-    /// 1. Write weights+targets into SHM
-    /// 2. Signal daemon (`night_start`)
-    /// 3. Wait for `night_done` (or `error`) with timeout
-    /// 4. Return updated targets from SHM
     /// Run one Night Phase Sprouting cycle:
     /// 1. Zero-Copy Write Handovers into Shared Memory
     /// 2. Binary Trigger (16 bytes) - Fast Path
@@ -113,29 +88,27 @@ impl BakerClient {
         unsafe {
             let hdr_ptr = self.shm_ptr as *mut ShmHeader;
             let dest = self.shm_ptr.add((*hdr_ptr).handovers_offset as usize) as *mut genesis_core::ipc::AxonHandoverEvent;
-            
-            // Прямое копирование из RAM в SHM, видимую демоном (DMA-style)
+
             std::ptr::copy_nonoverlapping(handovers.as_ptr(), dest, handovers.len());
             (*hdr_ptr).handovers_count = handovers.len() as u32;
         }
 
         // ── 2. Binary Trigger (16 bytes) - Fast Path ──
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .with_context(|| format!("Cannot connect to baker socket {:?}", self.socket_path))?;
+        let mut stream = self.connect_stream()?;
         stream.set_read_timeout(Some(timeout))?;
 
         let req = genesis_core::ipc::BakeRequest {
             magic: genesis_core::ipc::BAKE_MAGIC,
             zone_hash: self.zone_hash,
-            current_tick: 0, 
-            prune_threshold, // [DOD FIX] Передано аргументом
+            current_tick: 0,
+            prune_threshold,
             _padding: 0,
         };
 
         unsafe {
             let req_bytes = std::slice::from_raw_parts(
-                &req as *const _ as *const u8, 
-                std::mem::size_of::<genesis_core::ipc::BakeRequest>()
+                &req as *const _ as *const u8,
+                std::mem::size_of::<genesis_core::ipc::BakeRequest>(),
             );
             stream.write_all(req_bytes)?;
         }
@@ -155,22 +128,24 @@ impl BakerClient {
         }
     }
 
-    fn _header(&self) -> ShmHeader {
-        unsafe { std::ptr::read(self.shm_ptr as *const ShmHeader) }
+    #[cfg(unix)]
+    fn connect_stream(&self) -> Result<std::os::unix::net::UnixStream> {
+        use std::os::unix::net::UnixStream;
+        UnixStream::connect(&self.socket_addr)
+            .with_context(|| format!("Cannot connect to baker socket {}", self.socket_addr))
+    }
+
+    #[cfg(windows)]
+    fn connect_stream(&self) -> Result<std::net::TcpStream> {
+        std::net::TcpStream::connect(&self.socket_addr)
+            .with_context(|| format!("Cannot connect to baker TCP {}", self.socket_addr))
     }
 
     fn set_state(&mut self, state: ShmState) {
-        // state is at byte offset 5 in ShmHeader
         unsafe {
             self.shm_ptr.add(5).write_volatile(state as u8);
         }
     }
 }
 
-impl Drop for BakerClient {
-    fn drop(&mut self) {
-        if !self.shm_ptr.is_null() {
-            unsafe { libc::munmap(self.shm_ptr as *mut _, self.shm_len) };
-        }
-    }
-}
+// Drop: _mmap handles unmapping automatically

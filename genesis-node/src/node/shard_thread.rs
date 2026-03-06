@@ -4,7 +4,7 @@ use std::ptr;
 use crossbeam::channel::Receiver;
 use genesis_compute::ShardEngine;
 use genesis_core::config::InstanceConfig;
-use genesis_core::ipc::{AxonHandoverEvent, shm_name, shm_size, ShmHeader};
+use genesis_core::ipc::{AxonHandoverEvent, shm_size, ShmHeader};
 use memmap2::MmapMut;
 use std::fs::OpenOptions;
 use crate::network::bsp::BspBarrier;
@@ -47,36 +47,48 @@ pub struct ThreadWorkspace {
 
 impl ThreadWorkspace {
     pub fn new(zone_hash: u32, padded_n: usize) -> Self {
-        let name = shm_name(zone_hash);
-        let path = format!("/dev/shm{}", name);
-        
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .expect("Failed to create SHM file");
-        
+        let path = genesis_core::ipc::shm_file_path(zone_hash);
         let total_size = shm_size(padded_n);
-        file.set_len(total_size as u64).expect("Failed to set SHM size");
-        
-        let mut mmap = unsafe { MmapMut::map_mut(&file).expect("Failed to mmap SHM") };
-        
-        // Инициализируем заголовок контракта (Node владеет жизненным циклом)
-        let header = ShmHeader::new(zone_hash, padded_n as u32, 0); 
-        unsafe {
-            std::ptr::write(mmap.as_mut_ptr() as *mut ShmHeader, header);
-        }
 
-        Self {
-            weights_offset: header.weights_offset as usize,
-            targets_offset: header.targets_offset as usize,
-            handovers_offset: header.handovers_offset as usize,
-            shm_buffer: mmap,
-            checkpoint_state_buffer: vec![0u8; 0], // Will be resized in spawn
-            checkpoint_axons_buffer: vec![0u8; 0], // Will be resized in spawn
+        // Daemon creates the file; retry until valid header (race: daemon may not be ready yet)
+        for _ in 0..30 {
+            let file = match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+            {
+                Ok(f) => f,
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+            };
+            if file.metadata().map(|m| m.len()).unwrap_or(0) < total_size as u64 {
+                let _ = file.set_len(total_size as u64);
+            }
+            let mmap = match unsafe { MmapMut::map_mut(&file) } {
+                Ok(m) => m,
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+            };
+            let header = unsafe { std::ptr::read(mmap.as_ptr() as *const ShmHeader) };
+            if header.validate().is_ok() {
+                return Self {
+                    weights_offset: header.weights_offset as usize,
+                    targets_offset: header.targets_offset as usize,
+                    handovers_offset: header.handovers_offset as usize,
+                    shm_buffer: mmap,
+                    checkpoint_state_buffer: vec![0u8; 0],
+                    checkpoint_axons_buffer: vec![0u8; 0],
+                };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        panic!("SHM file {:?} not ready after 3s (is genesis-baker-daemon running?)", path);
     }
 
     pub fn weights_slice_mut(&mut self, padded_n: usize) -> &mut [i16] {
@@ -147,7 +159,7 @@ fn execute_day_phase(
         None
     };
 
-    if batch_counter % 10 == 0 {
+    if batch_counter % 100 == 0 {
         println!("🔍 [Shard I/O] v_offset: {}, v_axons: {}, v_seg: {}", virtual_offset, num_virtual_axons, v_seg);
         if let Some(slice) = input_slice {
             let active = slice.iter().any(|&w| w != 0);

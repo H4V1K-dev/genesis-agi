@@ -45,11 +45,46 @@ const _: () = assert!(
 );
 
 pub fn shm_name(zone_hash: u32) -> String {
-    format!("/genesis_shard_{:08X}", zone_hash)
+    format!("genesis_shard_{:08X}", zone_hash)
 }
 
+/// Path to the shared memory file. On Unix: /dev/shm/name (or POSIX shm name).
+/// On Windows: temp_dir/name (file-backed mmap).
+pub fn shm_file_path(zone_hash: u32) -> std::path::PathBuf {
+    let name = shm_name(zone_hash);
+    #[cfg(unix)]
+    {
+        std::path::PathBuf::from("/dev/shm").join(&name)
+    }
+    #[cfg(windows)]
+    {
+        std::env::temp_dir().join(&name)
+    }
+}
+
+/// POSIX shm_open name (Unix only). Includes leading slash for shm namespace.
+#[cfg(unix)]
+pub fn shm_posix_name(zone_hash: u32) -> String {
+    format!("/{}", shm_name(zone_hash))
+}
+
+/// Default control channel address. Unix: socket path. Windows: TCP host:port.
 pub fn default_socket_path(zone_hash: u32) -> String {
-    format!("/tmp/genesis_baker_{:08X}.sock", zone_hash)
+    #[cfg(unix)]
+    {
+        format!("/tmp/genesis_baker_{:08X}.sock", zone_hash)
+    }
+    #[cfg(windows)]
+    {
+        let port = default_socket_port(zone_hash);
+        format!("127.0.0.1:{}", port)
+    }
+}
+
+/// TCP port for baker IPC (Windows). Base 19000 + zone_hash % 1000.
+#[cfg(windows)]
+pub fn default_socket_port(zone_hash: u32) -> u16 {
+    (19000 + (zone_hash % 1000)) as u16
 }
 
 pub const fn shm_size(padded_n: usize) -> usize {

@@ -74,7 +74,9 @@ impl NodeSocket {
         }
 
         let (header_bytes, body_bytes) = buf.split_at(header_sz);
-        let header: &SpikeBatchHeader = bytemuck::from_bytes(header_bytes);
+        let mut hdr_buf = [0u8; 8];
+        hdr_buf.copy_from_slice(header_bytes);
+        let header: &SpikeBatchHeader = bytemuck::from_bytes(&hdr_buf);
         
         if header.magic != 0x5350494B {
             bail!("Invalid spike batch magic: {:x}", header.magic);
@@ -90,9 +92,14 @@ impl NodeSocket {
         // We slice strictly what the header claimed (ignoring trailing padding if any)
         let exact_body_bytes = &body_bytes[..expected_body_sz];
         
-        // Zero-copy cast back to SpikeEvent slice, then clone into a vector.
-        let events_slice: &[SpikeEvent] = bytemuck::cast_slice(exact_body_bytes);
+        // Safe parse: network buffer may be unaligned
+        let events_slice: Vec<SpikeEvent> = exact_body_bytes.chunks_exact(8)
+            .map(|c| SpikeEvent {
+                ghost_axon_id: u32::from_le_bytes(c[0..4].try_into().unwrap()),
+                tick_offset: u32::from_le_bytes(c[4..8].try_into().unwrap()),
+            })
+            .collect();
         
-        Ok((src_addr, batch_id, events_slice.to_vec()))
+        Ok((src_addr, batch_id, events_slice))
     }
 }
