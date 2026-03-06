@@ -56,7 +56,8 @@ pub const fn shm_size(padded_n: usize) -> usize {
     let weights_bytes = padded_n * 128 * 2;
     let targets_bytes = padded_n * 128 * 4;
     let handovers_bytes = MAX_HANDOVERS_PER_NIGHT * 16;
-    64 + weights_bytes + targets_bytes + handovers_bytes
+    let flags_bytes = padded_n;
+    64 + weights_bytes + targets_bytes + handovers_bytes + flags_bytes
 }
 
 #[repr(C)]
@@ -75,7 +76,8 @@ pub struct ShmHeader {
     pub handovers_offset: u32,  // 36..40
     pub handovers_count: u32,   // 40..44
     pub zone_hash: u32,         // 44..48 [DOD FIX: Уникальный ID]
-    pub _padding: [u8; 16],     // 48..64 (Выравнивание кэш-линии)
+    pub flags_offset: u32,      // 48..52
+    pub _padding: [u8; 12],     // 52..64 (Выравнивание кэш-линии)
 }
 
 
@@ -103,7 +105,8 @@ impl ShmHeader {
             handovers_offset,
             handovers_count: 0,
             zone_hash,
-            _padding: [0; 16],
+            flags_offset: 0,
+            _padding: [0; 12],
         }
     }
 

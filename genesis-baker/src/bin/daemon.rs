@@ -10,6 +10,9 @@ use genesis_core::ipc::{
 use genesis_core::config::manifest::ZoneManifest;
 use genesis_core::config::blueprints::BlueprintsConfig;
 use genesis_core::constants::MAX_DENDRITE_SLOTS;
+use rayon::prelude::*;
+use genesis_core::constants::{AXON_SENTINEL, V_SEG};
+use genesis_core::signal::initial_axon_head;
 struct NightPhaseContext {
     _baked_dir: PathBuf,
     _layer_ranges: Vec<genesis_baker::bake::axon_growth::LayerZRange>,
@@ -40,6 +43,8 @@ struct NightPhaseContext {
     // [Phase 41.2] Types Cache (1 byte per axon) and Whitelist bitmasks
     _neuron_types_cache: Vec<u8>,
     _whitelist_masks: [u16; 16],
+
+    _v_seg: u16,
 }
 
 #[derive(Parser)]
@@ -99,7 +104,7 @@ fn main() {
     println!("   Loaded {} neuron types", blueprints.as_ref().map(|b| b.neuron_types.len()).unwrap_or(0));
 
     // [DOD FIX] Кешируем конфиги для inject_ghost_axons — один раз при старте
-    let night_ctx = build_night_context(&cli.baked_dir, &brain_toml);
+    let mut night_ctx = build_night_context(&cli.baked_dir, &brain_toml);
 
     let socket_path = default_socket_path(zone_hash);
 
@@ -115,8 +120,7 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let bp_ref = blueprints.as_ref();
-                if let Err(e) = handle_night_phase(stream, zone_hash, bp_ref, night_ctx.as_ref(), ptr as *mut u8) {
+                if let Err(e) = handle_night_phase(stream, zone_hash, blueprints.as_ref(), night_ctx.as_mut(), ptr as *mut u8) {
                     eprintln!("❌ Night Phase error: {}", e);
                 }
             }
@@ -243,8 +247,11 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
 
     println!("[Daemon] Loaded {} axon geometries (next_ghost_slot_base={})", total_axons_max, padded_n);
 
-    // [Шаг 4] Загружаем soma_to_axon маппинг для интеграции новых ghost axons
-    // Файл .state: [padded_n * u32 voltages] + [padded_n * u8 flags] + [padded_n * u32 thresholds] + [padded_n * u8 timers] + [padded_n * u32 soma_to_axon] + ...
+    // [Шаг 4] Загружаем сома_to_axon маппинг для интеграции новых ghost axons
+    let manifest_path = baked_dir.join("BrainDNA").join("manifest.toml"); 
+    let manifest = genesis_core::config::manifest::ZoneManifest::load(&manifest_path)
+        .map_err(|e| eprintln!("[Daemon] Cannot load manifest.toml: {}", e)).ok()?;
+
     let soma_to_axon = {
         let state_path = baked_dir.join("shard.state");
         if state_path.exists() {
@@ -319,6 +326,7 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
         _soma_to_axon: soma_to_axon,
         _neuron_types_cache: neuron_types_cache,
         _whitelist_masks: whitelist_masks,
+        _v_seg: manifest.memory.v_seg,
     })
 }
 
@@ -326,7 +334,7 @@ fn handle_night_phase(
     mut stream: UnixStream,
     _zone_hash: u32,
     blueprints: Option<&BlueprintsConfig>,
-    ctx: Option<&NightPhaseContext>,
+    ctx: Option<&mut NightPhaseContext>,
     shm_ptr: *mut u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Read binary BakeRequest (16 bytes)
@@ -367,7 +375,7 @@ fn handle_night_phase(
     // 4. CPU Sprouting (Zero-Copy)
     let empty_cache: &[u8] = &[];
     let default_masks = [0xFFFF; 16];
-    let (axon_types_cache, whitelist_masks) = if let Some(c) = ctx {
+    let (axon_types_cache, whitelist_masks) = if let Some(ref c) = ctx {
         (c._neuron_types_cache.as_slice(), &c._whitelist_masks)
     } else {
         (empty_cache, &default_masks)
@@ -385,11 +393,121 @@ fn handle_night_phase(
 
     println!("   ↳ Sprouted {} new synapses", new_synapses);
 
-    // 5. GSOP Plasticity / Ghost Integration (TODO/Placeholders)
-    // Here we would use `handovers` for GSOP or Growth logic.
-    // For now, mirroring the task's focus on IPC.
+    // 5. Defragmentation (Parallel Columnar Compaction)
+    println!("   🌙 Defragmenting {} neurons...", padded_n);
+    
+    let t_ptr = targets.as_mut_ptr() as usize;
+    let w_ptr = weights.as_mut_ptr() as usize;
 
-    // 6. Signal Done via Shared Memory state
+    (0..padded_n).into_par_iter().for_each(|i| {
+        let targets_raw = t_ptr as *mut u32;
+        let weights_raw = w_ptr as *mut i16;
+        
+        let mut write_slot = 0;
+        for read_slot in 0..128 {
+            let idx = read_slot * padded_n + i;
+            unsafe {
+                let target = *targets_raw.add(idx);
+                if target != 0 {
+                    if write_slot != read_slot {
+                        *targets_raw.add(write_slot * padded_n + i) = target;
+                        *weights_raw.add(write_slot * padded_n + i) = *weights_raw.add(idx);
+                    }
+                    write_slot += 1;
+                }
+            }
+        }
+        // Zero out remaining slots
+        for s in write_slot..128 {
+            unsafe {
+                *targets_raw.add(s * padded_n + i) = 0;
+                *weights_raw.add(s * padded_n + i) = 0;
+            }
+        }
+    });
+
+    // 6. Axon Head Regeneration & Ghost Integration
+    if let Some(c) = ctx {
+        // [A] Local Axons Reset (Spike triggered)
+        if hdr.flags_offset != 0 {
+            let flags = unsafe {
+                let ptr = shm_ptr.add(hdr.flags_offset as usize);
+                std::slice::from_raw_parts(ptr, padded_n)
+            };
+            
+            for i in 0..padded_n {
+                let axon_idx = c._soma_to_axon[i];
+                if axon_idx != u32::MAX && axon_idx < c._axon_heads.len() as u32 {
+                    // Bit 0 - Spike flag
+                    if (flags[i] & 0x01) != 0 {
+                        c._axon_heads[axon_idx as usize].h0 = 0; // Reset head to 0
+                    }
+                }
+            }
+        }
+
+        // [B] Ghost Axon Allocation
+        let mut current_ghost_slot = c._next_ghost_slot_base;
+        for ev in _handovers {
+            if current_ghost_slot < c._total_axons_max {
+                let idx = current_ghost_slot as usize;
+                
+                // Regenerate head
+                let head = initial_axon_head(ev.remaining_length as u32);
+                c._axon_heads[idx].h0 = head;
+                
+                // Update geometry/persistence helper
+                c._axon_tips_uvw[idx] = (ev.entry_x as u32) | ((ev.entry_y as u32) << 16); // Placeholder packing
+                c._axon_dirs_xyz[idx] = (ev.vector_x as u32) | ((ev.vector_y as u32) << 8) | ((ev.vector_z as u32) << 16);
+                
+                current_ghost_slot += 1;
+            } else {
+                eprintln!("⚠️ [Daemon] Ghost capacity exceeded! Max={}, Requested={}", c._total_axons_max, current_ghost_slot);
+                unsafe {
+                    shm_ptr.add(5).write_volatile(ShmState::Error as u8);
+                }
+                break;
+            }
+        }
+
+        // 7. Persistence (Dump to Disk)
+        println!("   💾 Dumping updated shard state to disk...");
+        let out_dir = &c._baked_dir; // Actually we should dump back to BakedDir
+        
+        let mut voltages = vec![0i32; padded_n];
+        let flags = vec![0u8; padded_n];
+        let mut thresholds = vec![0i32; padded_n];
+        let timers = vec![0u8; padded_n];
+        
+        // Reconstruct from blueprints and types cache
+        for i in 0..padded_n {
+            let type_idx = c._neuron_types_cache[i] as usize;
+            if let Some(nt) = c._neuron_types.get(type_idx) {
+                voltages[i] = nt.rest_potential;
+                thresholds[i] = nt.threshold;
+            }
+        }
+        
+        genesis_baker::bake::layout::write_state_blob(
+            &out_dir.join("shard.state"),
+            padded_n,
+            &voltages,
+            &flags,
+            &thresholds,
+            &timers,
+            &c._soma_to_axon,
+            targets,
+            weights,
+            &vec![0u8; padded_n * 128], // dendrite_timers
+        ).expect("Failed to write updated .state");
+        
+        genesis_baker::bake::layout::write_axons_blob(
+            &out_dir.join("shard.axons"),
+            &c._axon_heads,
+        ).expect("Failed to write updated .axons");
+    }
+
+    // 8. Signal Done via Shared Memory state
     unsafe {
         shm_ptr.add(5).write_volatile(ShmState::NightDone as u8);
     }

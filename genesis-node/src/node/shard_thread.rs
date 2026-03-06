@@ -238,6 +238,7 @@ fn execute_night_phase(
     shard_config: &InstanceConfig,
     rt_handle: &tokio::runtime::Handle,
     workspace: &mut ThreadWorkspace,
+    baked_dir: &std::path::Path,
 ) {
     let padded_n = shard.vram.padded_n as usize;
     let dendrites_count = padded_n * genesis_core::constants::MAX_DENDRITE_SLOTS;
@@ -260,6 +261,19 @@ fn execute_night_phase(
             workspace.targets_slice_mut(padded_n).as_mut_ptr() as *mut _,
             shard.vram.ptrs.dendrite_targets as *const _,
             dendrites_count * std::mem::size_of::<u32>(),
+        );
+
+        let hdr_ptr = workspace.shm_buffer.as_mut_ptr() as *mut genesis_core::ipc::ShmHeader;
+        let hdr = &mut *hdr_ptr;
+
+        // 2.1 Flags D2H (Required for Night Phase Axon Reset)
+        let flags_off = hdr.handovers_offset as usize + (genesis_core::ipc::MAX_HANDOVERS_PER_NIGHT * 16);
+        hdr.flags_offset = flags_off as u32;
+        
+        genesis_compute::ffi::gpu_memcpy_device_to_host(
+            workspace.shm_buffer.as_mut_ptr().add(flags_off) as *mut _,
+            shard.vram.ptrs.soma_flags as *const _,
+            padded_n * std::mem::size_of::<u8>(),
         );
     }
 
@@ -296,6 +310,16 @@ fn execute_night_phase(
                         workspace.weights_slice_mut(padded_n).as_ptr() as *const _,
                         dendrites_count * std::mem::size_of::<i16>(),
                     );
+                    
+                    // [DOD] Stage 44.3: Hot Reload Refresh
+                    // After the baker has updated the files on disk, we must re-sync VRAM.
+                    if let Ok(state_blob) = std::fs::read(baked_dir.join("shard.state")) {
+                        shard.vram.upload_state(&state_blob);
+                    }
+                    if let Ok(axons_blob) = std::fs::read(baked_dir.join("shard.axons")) {
+                        shard.vram.upload_axon_heads(&axons_blob);
+                    }
+                    
                     genesis_compute::ffi::gpu_device_synchronize();
                 }
 
@@ -519,7 +543,7 @@ pub fn spawn_shard_thread(
                         if ctx.night_interval > 0 && current_tick_count % ctx.night_interval == 0 {
                             execute_night_phase(
                                 &mut desc.engine, hash, std::path::Path::new(&socket_path), &mut baker_client,
-                                &ctx.incoming_grow, &desc.config, &ctx.rt_handle, &mut workspace,
+                                &ctx.incoming_grow, &desc.config, &ctx.rt_handle, &mut workspace, &desc.baked_dir,
                             );
                         }
 

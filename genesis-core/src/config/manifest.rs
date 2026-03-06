@@ -100,6 +100,15 @@ pub struct ZoneManifest {
     pub connections: Vec<ManifestConnection>,
 }
 
+impl ZoneManifest {
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read manifest at {:?}: {}", path, e))?;
+        toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse TOML manifest from {:?}: {}", path, e))
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ManifestConnection {
     pub from: String,

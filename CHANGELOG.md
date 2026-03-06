@@ -8,6 +8,171 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.202.28] - 2026-03-06 19:10
+
+**Homeostatic Stabilization & Global Reward**
+
+### Added
+- Implement symmetric dopamine modulation in `cu_apply_gsop_kernel` using `dopa_factor` applied to both `delta_pot` and `delta_dep`
+- Add `MAX_THRESH_OFFSET` soft cap in `cu_update_neurons_kernel` to limit threshold growth to 5× base
+- Fix branchless integer truncation bug in leak calculation, ensuring precise decay to `rest_potential`
+- Update `TelemetryFrameHeader` in `ipc.rs` to 20 bytes, adding `global_dopamine: i16` and `_pad: u16`
+- Extend `swap_and_ready` in `telemetry.rs` to store `global_dopamine` via `ready_dopamine: AtomicI32`
+- Update `mod.rs` to pass `current_dopamine` into the `swap_and_ready` call
+- Update `websocket_stream` frame packer and `decode_telemetry_frame` parser for new memory layout
+
+## [0.196.27] - 2026-03-06 19:10
+
+**Homeostatic Stabilization & Global Reward**
+
+### Added
+- Implement symmetric dopamine modulation in `cu_apply_gsop_kernel` using `dopa_factor` applied to both `delta_pot` and `delta_dep`
+- Add `MAX_THRESH_OFFSET` soft cap in `cu_update_neurons_kernel` to limit threshold growth to 5× base
+- Fix branchless integer truncation bug in leak calculation, ensuring precise decay to `rest_potential`
+- Update `TelemetryFrameHeader` in `ipc.rs` to 20 bytes, adding `global_dopamine: i16` and `_pad: u16`
+- Extend `swap_and_ready` in `telemetry.rs` to store `global_dopamine` via `ready_dopamine: AtomicI32`
+- Update `mod.rs` to pass `current_dopamine` into the `swap_and_ready` call
+- Update `websocket_stream` frame packer and `decode_telemetry_frame` parser for new memory layout
+
+## [0.190.26] - 2026-03-06 19:10
+
+**Homeostatic Stabilization & Global Reward**
+
+### Added
+- Implement symmetric dopamine modulation in `cu_apply_gsop_kernel` using `dopa_factor` applied to both `delta_pot` and `delta_dep`
+- Add `MAX_THRESH_OFFSET` soft cap in `cu_update_neurons_kernel` to limit threshold growth to 5× base
+- Fix branchless integer truncation bug in leak calculation, ensuring precise decay to `rest_potential`
+- Update `TelemetryFrameHeader` in `ipc.rs` to 20 bytes, adding `global_dopamine: i16` and `_pad: u16`
+- Extend `swap_and_ready` in `telemetry.rs` to store `global_dopamine` via `ready_dopamine: AtomicI32`
+- Update `mod.rs` to pass `current_dopamine` into the `swap_and_ready` call
+- Update `websocket_stream` frame packer and `decode_telemetry_frame` parser for new memory layout
+
+## [0.184.25] - 2026-03-06 19:10
+
+**Homeostatic Stabilization & Global Reward**
+
+### Added
+- Implement symmetric dopamine modulation in `cu_apply_gsop_kernel` using `dopa_factor` applied to both `delta_pot` and `delta_dep`
+- Add `MAX_THRESH_OFFSET` soft cap in `cu_update_neurons_kernel` to limit threshold growth to 5× base
+- Fix branchless integer truncation bug in leak calculation, ensuring precise decay to `rest_potential`
+- Update `TelemetryFrameHeader` in `ipc.rs` to 20 bytes, adding `global_dopamine: i16` and `_pad: u16`
+- Extend `swap_and_ready` in `telemetry.rs` to store `global_dopamine` via `ready_dopamine: AtomicI32`
+- Update `mod.rs` to pass `current_dopamine` into the `swap_and_ready` call
+- Update `websocket_stream` frame packer and `decode_telemetry_frame` parser for new memory layout
+
+## [0.178.24] - 2026-03-06 18:54
+
+**Macro-Geometric Continuity**
+
+### Added
+- Add `z_plus` and `z_minus` fields to the `Neighbors` struct in `instance.rs`
+- Assert new neighbor properties in `test_instance.rs` for validation
+- Determine Z-exit plane in `shard_thread.rs` using `vector_z` sign and `entry_z`
+- Push events to new `z_plus` and `z_minus` arrays based on `max_z` boundary
+- Iterate and broadcast events to `z_plus` and `z_minus` neighbor addresses
+- In `axon_growth.rs`, calculate `entry_z` using `vector_z` sign instead of hardcoded `z_start`
+- Set `entry_z` to `shard_bounds.z_start` for positive `vector_z` (entry from below)
+- Set `entry_z` to `shard_bounds.z_end.saturating_sub(1)` for negative `vector_z` (entry from above)
+- Update `mock_ffi.rs` to align with Phase 40 and 41 interface changes
+
+## [0.174.23] - 2026-03-06 18:38
+
+**Sprouting Engine Reconstruction**
+
+### Added
+- Remove prune_threshold parameter from launch_sort_and_prune in mock_ffi.rs
+- Remove prune_threshold parameter from execute_night_phase in shard_thread.rs
+- Update launch_sort_and_prune signature to accept ShardVramPtrs and padded_n
+- Add _neuron_types_cache field to NightPhaseContext in daemon.rs
+- Extract neuron type flags from shard.state in build_night_context
+- Pass _neuron_types_cache as axon_types slice to run_sprouting_pass in handle_night_phase
+- Update run_sprouting_pass signature to accept axon_types slice
+- Implement Hard Filter using dendrite_whitelist in run_sprouting_pass loop
+- Implement Branchless Affinity in compute_sprouting_score using owner_type_id and target_type_id
+
+## [0.171.23] - 2026-03-06 18:23
+
+**Warp-Aggregated Telemetry Integration**
+
+### Added
+- Add `cu_extract_telemetry_kernel` using a single `atomicAdd` per warp to reduce PCIe traffic
+- Insert kernel after `cu_record_readout_kernel` and before `extern "C"` block in physics.cu
+- Add C-launcher `launch_extract_telemetry` with `ShardVramPtrs*`, `padded_n`, and stream parameters
+- Remove deprecated `gpu_reset_telemetry_count` function from ffi.rs and mock_ffi.rs
+- Update `launch_extract_telemetry` signature to accept `*const ShardVramPtrs` and `padded_n: u32`
+- Synchronize mock_ffi.rs stub with new function signature for testing
+- Add `telemetry_ids_ptr` and `telemetry_count_ptr` fields to `ComputeCommand::RunBatch`
+- Call `telemetry_swapchain.swap_and_ready` at loop start in `run_node_loop`
+- Capture raw pointers from swapchain back_buffer and count_buffer for command transmission
+- In shard_thread, destructure new pointers and call `launch_extract_telemetry` after `execute_day_phase`
+- Reset CPU-side telemetry count with `std::ptr::write_volatile` before GPU extraction launch
+
+## [0.166.23] - 2026-03-06 18:10
+
+**Network Purge & Telemetry Bridge**
+
+### Added
+- Delete `send_output_batch` and `run_input_loop` async functions from io_server.rs
+- Delete `flush_outgoing_batch` async function from inter_node.rs
+- Delete `sync_spikes` stub function from intra_gpu.rs
+- Add public `telemetry_swapchain: Arc<TelemetrySwapchain>` field to NodeRuntime struct
+- Update `boot` function signature to use the parameter name `telemetry_swapchain` instead of `_telemetry_swapchain`
+- Initialize the `telemetry_swapchain` field in the NodeRuntime constructor within `boot`
+
+## [0.164.23] - 2026-03-06 18:03
+
+**Hot Loop Annihilation: __restrict__, push_burst_head, Branchless GSOP**
+
+### Added
+- Add __restrict__ qualifier to all 8 pointer fields in ShardVramPtrs struct in physics.cu
+- Add __restrict__ to kernel signatures: cu_inject_inputs_kernel, cu_apply_spike_batch_kernel, cu_record_readout_kernel, cu_step_day_phase in physics.cu
+- Add __restrict__ qualifier to all 9 pointer fields in ShardVramPtrs struct in bindings.cu
+- Add __restrict__ to kernel signatures: inject_inputs_kernel, apply_spike_batch_kernel, ghost_sync_kernel, extract_outgoing_spikes_kernel in bindings.cu
+- Implement __device__ __forceinline__ push_burst_head(BurstHeads8* h) helper function in physics.cu
+- Replace manual burst shift blocks with push_burst_head(&h) in cu_inject_inputs_kernel, cu_apply_spike_batch_kernel, cu_update_neurons_kernel
+- Add push_burst_head helper after AXON_SENTINEL define in bindings.cu
+- Replace manual burst shift blocks with push_burst_head(&h) in inject_inputs_kernel, apply_spike_batch_kernel
+- Replace explicit per-field comparisons in cu_apply_gsop_kernel with #pragma unroll for loop over 8 heads
+- Use cast (uint32_t*)&b to iterate BurstHeads8 fields without padding
+- Implement branchless conditional: min_dist = min(min_dist, (d < len) ? d : 0xFFFFFFFF) to avoid divergence
+
+## [0.161.23] - 2026-03-06 10:47
+
+**Genesis Code Cleanup & Strictness Enforcement**
+
+### Added
+- Add #![deny(warnings)], #![deny(unused_variables)], and #![deny(dead_code)] to all crate entry points: genesis-core/src/lib.rs, genesis-baker/src/main.rs, genesis-baker/src/lib.rs, genesis-ide/src/main.rs, genesis-compute/src/lib.rs, genesis-node/src/main.rs
+- Restructure genesis-baker/src/main.rs to use library modules, eliminating redundant compilation warnings
+- Remove file-level #![allow(dead_code)] from genesis-ide/src/connectome.rs, genesis-ide/src/world.rs, and genesis-ide/src/io_matrix.rs
+- Remove serialize_axons and atomic_write functions from genesis-baker/src/main.rs
+- Purge compute_power_index and unused sprouting logic from genesis-baker/src/bake/sprouting.rs
+- Remove _master_seed parameter from connect_dendrites signature and all call sites in topology.rs
+- Clean up unmaintained variables in genesis-baker/src/bake/axon_growth.rs
+- Delete unused SpikeRoute, GlobalSpikeMap, and get_type_color from genesis-ide/src/world.rs
+- Move AxonInstance, IoPixelInstance, MaterialUniforms, and NeuronPalette into shader_data or material_data submodules with #[allow(dead_code)] annotations
+- Remove #[allow(dead_code)] from individual structs in connectome.rs and io_matrix.rs
+- Systematically remove dozens of unused imports and variables across genesis-node and genesis-baker-daemon
+
+## [0.158.23] - 2026-03-06 09:39
+
+**[Performance] Dynamic pruning threshold for synaptic plasticity**
+
+### Added
+- Add `prune_threshold` field to `VariantParameters` struct in configuration
+- Update `sort_and_prune_kernel` CUDA kernel implementation to use dynamic threshold
+- Modify `launch_sort_and_prune` API function signature to accept `prune_threshold` argument
+- Update all zone blueprint configurations (MotorCortex, SensoryCortex, V1) with explicit `prune_threshold` values
+- Refactor genesis-baker sprouting logic to integrate new pruning parameter
+- Adjust genesis-node shard thread and orchestrator sprouting for updated compute calls
+- Clean up template configuration files, removing redundant _blank_blueprints.toml entries
+- Update specification documents (foundations, configuration, connectivity, distributed) with pruning threshold details
+- Synchronize genesis-ide asset configurations with new blueprint structure
+- Run full workspace validation with `cargo check --workspace`
+
+## [0.149.23] - 2026-03-06 05:24
+
+**doc**
+
 ## [0.143.23] - 2026-03-06 05:23
 
 **CartPole 2E2 Duble Nodes**
