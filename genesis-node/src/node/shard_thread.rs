@@ -331,6 +331,8 @@ fn dispatch_handovers(
     let mut x_minus = Vec::new();
     let mut y_plus = Vec::new();
     let mut y_minus = Vec::new();
+    let mut z_plus = Vec::new();
+    let mut z_minus = Vec::new();
 
     let max_x = shard_config.dimensions.w as u16;
     let max_y = shard_config.dimensions.d as u16;
@@ -344,6 +346,10 @@ fn dispatch_handovers(
             y_plus.push(*ev);
         } else if ev.entry_y == 0 {
             y_minus.push(*ev);
+        } else if ev.vector_z > 0 {
+            z_plus.push(*ev);
+        } else if ev.vector_z < 0 {
+            z_minus.push(*ev);
         }
     }
 
@@ -367,6 +373,16 @@ fn dispatch_handovers(
     if !y_minus.is_empty() {
         if let Some(ref addr) = neighbors.y_minus {
             routes_to_execute.push((addr.clone(), y_minus));
+        }
+    }
+    if !z_plus.is_empty() {
+        if let Some(ref addr) = neighbors.z_plus {
+            routes_to_execute.push((addr.clone(), z_plus));
+        }
+    }
+    if !z_minus.is_empty() {
+        if let Some(ref addr) = neighbors.z_minus {
+            routes_to_execute.push((addr.clone(), z_minus));
         }
     }
 

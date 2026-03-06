@@ -18,6 +18,7 @@ fn test_parse_instance_config() {
         [neighbors]
         x_minus = "127.0.0.1:8000"
         y_plus = "Self"
+        z_minus = "127.0.0.2:9000"
     "#;
 
     let config = InstanceConfig::parse(toml_str).expect("Failed to parse");
@@ -26,5 +27,7 @@ fn test_parse_instance_config() {
     assert_eq!(config.dimensions.h, 1000);
     assert_eq!(config.neighbors.x_minus.as_deref(), Some("127.0.0.1:8000"));
     assert_eq!(config.neighbors.y_plus.as_deref(), Some("Self"));
+    assert_eq!(config.neighbors.z_minus.as_deref(), Some("127.0.0.2:9000"));
     assert_eq!(config.neighbors.x_plus, None);
+    assert_eq!(config.neighbors.z_plus, None);
 }

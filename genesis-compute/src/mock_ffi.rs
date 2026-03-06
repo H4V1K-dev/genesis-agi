@@ -1,4 +1,3 @@
-
 use genesis_core::layout::VramState;
 use genesis_core::ipc::SpikeEvent;
 use std::sync::Mutex;
@@ -197,6 +196,7 @@ pub extern "C" fn launch_extract_outgoing_spikes(
     _dst_ghost_ids: *const u32,
     _count: u32,
     _sync_batch_ticks: u32,
+    _v_seg: u32,
     _out_events: *mut c_void,
     _out_count: *mut u32,
     _stream: *mut c_void,
@@ -211,8 +211,6 @@ pub extern "C" fn launch_ghost_sync(
     _count: u32,
     _stream: *mut c_void,
 ) {}
-
-
 
 #[no_mangle]
 pub extern "C" fn launch_extract_telemetry(
