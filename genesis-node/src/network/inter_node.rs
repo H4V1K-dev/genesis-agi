@@ -38,9 +38,9 @@ impl InterNodeChannel {
         ffi::gpu_memcpy_host_to_device_async(src_d as *mut _, src_indices.as_ptr() as *const _, (count as usize) * 4, ptr::null_mut());
         ffi::gpu_memcpy_host_to_device_async(dst_d as *mut _, dst_ghost_ids.as_ptr() as *const _, (count as usize) * 4, ptr::null_mut());
 
-        // Максимум 1 спайк на аксон за батч
+        // Максимум 8 спайков на аксон за батч (8-way Burst model)
         // Используем 8 байт (SpikeEvent pack layout)
-        let events_size = (count as usize) * std::mem::size_of::<SpikeEvent>();
+        let events_size = (count as usize) * 8 * std::mem::size_of::<SpikeEvent>();
         
         Self {
             target_zone_hash,
@@ -73,8 +73,10 @@ impl InterNodeChannel {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SpikeBatchHeaderV2 {
-    pub src_zone_hash: u64,
-    pub dst_zone_hash: u64,
+    pub src_zone_hash: u32,
+    pub dst_zone_hash: u32,
+    pub epoch: u32,
+    pub is_last: u32, // 1 = последний чанк в эпохе (Heartbeat)
 }
 
 #[repr(C)]
@@ -98,12 +100,15 @@ impl InterNodeRouter {
     pub async fn flush_outgoing_batch(
         &self, 
         target_zone_hash: u32, 
-        events: &[crate::network::SpikeEvent]
+        events: &[crate::network::SpikeEvent],
+        epoch: u32,
     ) {
         if let Some(target_addr) = self.routing_table.get_address(target_zone_hash) {
             let header = SpikeBatchHeaderV2 {
                 src_zone_hash: 0, // Не используется для Ingress, заполняем нулем
-                dst_zone_hash: target_zone_hash as u64,
+                dst_zone_hash: target_zone_hash,
+                epoch,
+                is_last: 1, // Single packet is always the last one
             };
             
             // В сыром виде мы отправляем Header (16 байт) + Slice events (8 байт на ивент)
@@ -117,41 +122,66 @@ impl InterNodeRouter {
         }
     }
 
-    /// Zero-Cost отправка батча спайков через Lock-Free Egress Pool
+    /// Zero-Cost отправка батча спайков через Lock-Free Egress Pool с L7-фрагментацией.
     pub fn flush_outgoing_batch_pool(
-        &self, 
+        &self,
         pool: &crate::network::egress::EgressPool,
         src_zone_hash: u32,
-        target_zone_hash: u32, 
-        events: &[crate::network::SpikeEvent]
+        target_zone_hash: u32,
+        events: &[crate::network::SpikeEvent],
+        epoch: u32, // [DOD] Инъекция эпохи
     ) {
         let Some(target_addr) = self.routing_table.get_address(target_zone_hash) else { return; };
-        
-        let mut msg = loop {
-            if let Some(m) = pool.free_queue.pop() {
-                break m;
+        const MAX_EVENTS_PER_PACKET: usize = 8186;
+
+        // Отправка пустого Heartbeat, если спайков нет
+        if events.is_empty() {
+            let mut msg = loop {
+                if let Some(m) = pool.free_queue.pop() { break m; }
+                std::hint::spin_loop();
+            };
+            unsafe {
+                let header = msg.buffer.as_mut_ptr() as *mut SpikeBatchHeaderV2;
+                (*header).src_zone_hash = src_zone_hash;
+                (*header).dst_zone_hash = target_zone_hash;
+                (*header).epoch = epoch;
+                (*header).is_last = 1; // Единственный и последний
+                msg.size = 16;
             }
-            std::hint::spin_loop();
-        };
+            msg.target = target_addr;
+            pool.ready_queue.push(msg).unwrap();
+            return;
+        }
 
-        unsafe {
-            let header = msg.buffer.as_mut_ptr() as *mut SpikeBatchHeaderV2;
-            (*header).src_zone_hash = src_zone_hash as u64;
-            (*header).dst_zone_hash = target_zone_hash as u64;
+        // L7 Фрагментация
+        let chunks = events.chunks(MAX_EVENTS_PER_PACKET);
+        let total_chunks = chunks.len();
 
-            let events_bytes = bytemuck::cast_slice(events);
-            if !events_bytes.is_empty() {
+        for (i, chunk) in chunks.enumerate() {
+            let mut msg = loop {
+                if let Some(m) = pool.free_queue.pop() { break m; }
+                std::hint::spin_loop();
+            };
+
+            unsafe {
+                let header = msg.buffer.as_mut_ptr() as *mut SpikeBatchHeaderV2;
+                (*header).src_zone_hash = src_zone_hash;
+                (*header).dst_zone_hash = target_zone_hash;
+                (*header).epoch = epoch;
+                // Только последний чанк пробивает барьер получателя
+                (*header).is_last = if i == total_chunks - 1 { 1 } else { 0 };
+
+                let events_bytes = bytemuck::cast_slice(chunk);
                 std::ptr::copy_nonoverlapping(
                     events_bytes.as_ptr(),
                     msg.buffer.as_mut_ptr().add(16),
                     events_bytes.len()
                 );
+                msg.size = 16 + events_bytes.len();
             }
-            msg.size = 16 + events_bytes.len();
+            msg.target = target_addr;
+            pool.ready_queue.push(msg).unwrap();
         }
-        
-        msg.target = target_addr;
-        pool.ready_queue.push(msg).unwrap();
     }
     /// Запускает слушатель межзональных спайков (Sender-Side Mapping)
     pub async fn spawn_ghost_listener(
@@ -165,21 +195,28 @@ impl InterNodeRouter {
             loop {
                 if let Ok((size, _addr)) = sock.recv_from(&mut buf).await {
                     if size < 16 { continue; }
-                    
-                    let _header: SpikeBatchHeaderV2 = *bytemuck::from_bytes(&buf[0..16]);
-                    let payload_bytes = &buf[16..size];
-                    
-                    if payload_bytes.len() % 8 != 0 { continue; }
-                    
-                    let events: &[SpikeEventV2] = bytemuck::cast_slice(payload_bytes);
-                    
-                    let schedule = bsp_barrier.get_write_schedule();
-                    for ev in events {
-                        schedule.push_spike(ev.tick_offset as usize, ev.ghost_id);
+
+                    let header: SpikeBatchHeaderV2 = *bytemuck::from_bytes(&buf[0..16]);
+                    let current_epoch = bsp_barrier.current_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+                    // [DOD] Strict Epoch Filtering: Игнорируем прошлое и будущее
+                    if header.epoch != current_epoch {
+                        continue;
                     }
-                    
-                    // Увеличиваем счетчик полученных пакетов для BSP барьера
-                    bsp_barrier.packets_received.fetch_add(1, std::sync::atomic::Ordering::Release);
+
+                    let payload_bytes = &buf[16..size];
+                    if payload_bytes.len() % 8 == 0 && !payload_bytes.is_empty() {
+                        let events: &[SpikeEventV2] = bytemuck::cast_slice(payload_bytes);
+                        let schedule = bsp_barrier.get_write_schedule();
+                        for ev in events {
+                            schedule.push_spike(ev.tick_offset as usize, ev.ghost_id);
+                        }
+                    }
+
+                    // Барьер пробивается ТОЛЬКО когда получен последний чанк
+                    if header.is_last == 1 {
+                        bsp_barrier.completed_peers.fetch_add(1, std::sync::atomic::Ordering::Release);
+                    }
                 }
             }
         });

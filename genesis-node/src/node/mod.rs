@@ -202,7 +202,7 @@ impl NodeRuntime {
     // [DOD] Оркестратор изолирован от асинхронного Tokio-контекста
     pub fn run_node_loop(&self, batch_size: u32) {
         let mut current_tick = 0;
-        let mut log_counter: u64 = 0;
+        let mut batch_counter: u64 = 0;
 
         // [DOD FIX] Жесткая привязка OS-потока оркестратора к аппаратному контексту
         unsafe { genesis_compute::ffi::gpu_set_device(0); }
@@ -227,7 +227,7 @@ impl NodeRuntime {
 
             // 4. Dispatch batches to compute shards
             let current_dopamine = self.services.io_server.global_dopamine.load(Ordering::Relaxed) as i16;
-            if current_dopamine != 0 && log_counter % 100 == 0 {
+            if current_dopamine != 0 && batch_counter % 100 == 0 {
                 println!("💉 [Node] Dopamine: {}", current_dopamine);
             }
 
@@ -300,12 +300,13 @@ impl NodeRuntime {
                     &self.network.egress_pool, 
                     channel.src_zone_hash,
                     channel.target_zone_hash, 
-                    events_slice
+                    events_slice,
+                    (batch_counter & 0xFFFFFFFF) as u32
                 );
             }
 
             current_tick += batch_size;
-            log_counter  += 1;
+            batch_counter += 1;
             self.services.reporter.total_ticks.store(current_tick as u64, Ordering::Relaxed);
         }
     }

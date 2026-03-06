@@ -346,34 +346,37 @@ struct SpikeEvent {
 // Ядро компактизирует спайки из гигабайтного графа в плоский Pinned RAM буфер
 __global__ void extract_outgoing_spikes_kernel(
     const BurstHeads8 *axon_heads,
-    const uint32_t *src_indices,   // Локальные ID экспортируемых аксонов
-    const uint32_t *dst_ghost_ids, // Их ID на удаленной машине
+    const uint32_t *src_indices,   
+    const uint32_t *dst_ghost_ids, 
     uint32_t count, uint32_t sync_batch_ticks, uint32_t v_seg,
-    SpikeEvent *out_events, // Указатель на Pinned RAM (Mapped)
-    uint32_t *out_count     // Указатель на Pinned RAM (Mapped)
+    SpikeEvent *out_events, 
+    uint32_t *out_count     
 ) {
   uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= count)
-    return;
+  if (tid >= count) return;
 
   uint32_t local_axon = src_indices[tid];
   BurstHeads8 h = axon_heads[local_axon];
+  uint32_t ghost_id = dst_ghost_ids[tid];
 
-  // Мы читаем только h0 (самый свежий спайк). При батче 10мс и рефрактерности 15мс 
-  // физически не может быть 2 спайков за один батч.
-  uint32_t head = h.h0; 
-  if (head >= 0x70000000u) return;
+  // Кастуем структуру к массиву для развернутого прохода (Zero-cost)
+  const uint32_t* heads = (const uint32_t*)&h;
 
-  // Математика сдвига: head = тики_после_спайка * v_seg
-  uint32_t ticks_since_spike = head / v_seg;
+  #pragma unroll
+  for (int i = 0; i < 8; ++i) {
+      uint32_t head = heads[i];
+      
+      // Игнорируем мертвые хвосты (AXON_SENTINEL = 0x80000000)
+      if (head >= 0x70000000u) continue;
 
-  if (ticks_since_spike < sync_batch_ticks) {
-    // Атомарно занимаем слот в выходном буфере (Zero-cost atomic в L2)
-    uint32_t out_idx = atomicAdd(out_count, 1);
+      uint32_t ticks_since_spike = head / v_seg;
 
-    out_events[out_idx].ghost_id = dst_ghost_ids[tid];
-    // Восстанавливаем точный тик, на котором произошел спайк
-    out_events[out_idx].tick_offset = sync_batch_ticks - 1 - ticks_since_spike;
+      // Если спайк произошел ВНУТРИ текущего батча
+      if (ticks_since_spike < sync_batch_ticks) {
+          uint32_t out_idx = atomicAdd(out_count, 1);
+          out_events[out_idx].ghost_id = ghost_id;
+          out_events[out_idx].tick_offset = sync_batch_ticks - 1 - ticks_since_spike;
+      }
   }
 }
 

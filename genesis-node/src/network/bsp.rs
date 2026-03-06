@@ -1,5 +1,5 @@
 use crate::network::ring_buffer::SpikeSchedule;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU32, Ordering};
 
 /// BSP Барьер для синхронизации сети и вычислителя (Latency Hiding).
 /// Мы используем Ping-Pong Double Buffering: пока GPU читает из A, сеть пишет в B.
@@ -10,7 +10,8 @@ pub struct BspBarrier {
     pub writing_to_b: AtomicBool, 
     // [DOD] Сетевая синхронизация
     pub expected_peers: usize,
-    pub packets_received: AtomicUsize,
+    pub current_epoch: AtomicU32,     // [DOD] Global Sync Clock
+    pub completed_peers: AtomicUsize, // [DOD] Count of is_last flags
 }
 
 impl BspBarrier {
@@ -20,7 +21,8 @@ impl BspBarrier {
             schedule_b: SpikeSchedule::new(sync_batch_ticks),
             writing_to_b: AtomicBool::new(true),
             expected_peers,
-            packets_received: AtomicUsize::new(0),
+            current_epoch: AtomicU32::new(0),
+            completed_peers: AtomicUsize::new(0),
         }
     }
 
@@ -29,9 +31,9 @@ impl BspBarrier {
         let timeout = std::time::Duration::from_millis(50); // Ждем максимум 50мс
 
         // Ждем, пока Ingress UDP-сервер не запишет пакеты от всех соседей
-        while self.packets_received.load(Ordering::Acquire) < self.expected_peers {
+        while self.completed_peers.load(Ordering::Acquire) < self.expected_peers {
             if start.elapsed() > timeout {
-                println!("⚠️ [BSP] UDP Drop Detected! Forcing barrier bypass to prevent deadlock.");
+                println!("⚠️ [BSP] Timeout! Forcing epoch advance. Dropped data will be filtered out.");
                 break;
             }
             // [DOD] Выжигаем токены CPU минимально, не отдавая тред ОС
@@ -39,16 +41,14 @@ impl BspBarrier {
         }
     }
 
-    /// Вызывается ядром Node в конце батча: меняет буферы местами.
-    /// Переключение происходит на барьере BSP, гарантируя отсутствие гонок за данные (Race Conditions).
+    /// Вызывается ядром Node в конце батча: меняет буферы местами и инкрементирует эпоху.
     pub fn sync_and_swap(&self) {
-        // Сбрасываем барьер для следующего тика
-        self.packets_received.store(0, Ordering::Release);
+        // Сбрасываем барьер для следующей эпохи
+        self.current_epoch.fetch_add(1, Ordering::SeqCst);
+        self.completed_peers.store(0, Ordering::Release);
         
         let was_b = self.writing_to_b.fetch_xor(true, Ordering::SeqCst);
         if was_b {
-            // Сеть закончила писать в B, теперь мы сделаем B доступным для чтения GPU.
-            // Старый буфер A (который читал GPU) теперь свободен для записи.
             self.schedule_a.clear();
         } else {
             self.schedule_b.clear();
