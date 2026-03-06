@@ -173,7 +173,10 @@ impl InterNodeRouter {
                 if let Ok((size, _)) = sock.recv_from(&mut buf).await {
                     if size < 16 { continue; }
 
-                    let header: SpikeBatchHeaderV2 = *bytemuck::from_bytes(&buf[0..16]);
+                    // Safe: network buffer may be unaligned; copy to aligned storage
+                    let mut hdr_buf = [0u8; 16];
+                    hdr_buf.copy_from_slice(&buf[0..16]);
+                    let header: SpikeBatchHeaderV2 = *bytemuck::from_bytes(&hdr_buf);
                     let current_epoch = bsp_barrier.current_epoch.load(std::sync::atomic::Ordering::Acquire);
 
                     // 1. Biological Amnesia: Игнорируем пакеты из прошлого
@@ -183,7 +186,10 @@ impl InterNodeRouter {
 
                     // 2. Self-Healing: Прыжок в будущее, если мы отстали (или пропустили пакет)
                     if header.epoch > current_epoch {
-                        println!("⚠️ [BSP] Self-Healing: Fast-forwarding epoch {} -> {} to catch up", current_epoch, header.epoch);
+                        let n = bsp_barrier.self_heal_log_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n % 100 == 0 {
+                            println!("⚠️ [BSP] Self-Healing: Fast-forwarding epoch {} -> {} to catch up ({} jumps)", current_epoch, header.epoch, n + 1);
+                        }
                         bsp_barrier.current_epoch.store(header.epoch, std::sync::atomic::Ordering::Release);
                         bsp_barrier.completed_peers.store(0, std::sync::atomic::Ordering::Release);
                         bsp_barrier.get_write_schedule().clear();
@@ -195,13 +201,14 @@ impl InterNodeRouter {
                         continue;
                     }
 
-                    // 4. Обработка спайков
+                    // 4. Обработка спайков (safe parse: network buffer may be unaligned)
                     let payload_bytes = &buf[16..size];
                     if payload_bytes.len() % 8 == 0 && !payload_bytes.is_empty() {
-                        let events: &[SpikeEventV2] = bytemuck::cast_slice(payload_bytes);
                         let schedule = bsp_barrier.get_write_schedule();
-                        for ev in events {
-                            schedule.push_spike(ev.tick_offset as usize, ev.ghost_id);
+                        for chunk in payload_bytes.chunks_exact(8) {
+                            let ghost_id = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                            let tick_offset = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                            schedule.push_spike(tick_offset as usize, ghost_id);
                         }
                     }
 

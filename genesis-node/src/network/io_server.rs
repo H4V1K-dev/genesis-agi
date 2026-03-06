@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use tokio::net::UdpSocket;
 use genesis_core::ipc::{ExternalIoHeader, RouteUpdate};
 use genesis_core::constants::{GSIO_MAGIC, GSOO_MAGIC};
@@ -98,6 +98,7 @@ pub struct ExternalIoServer {
 
     // R-STDP Dopamine Modulator (Global Reward Broadcast)
     pub global_dopamine: Arc<std::sync::atomic::AtomicI32>,
+    pub dopamine_log_counter: AtomicU32,
 }
 
 impl ExternalIoServer {
@@ -114,6 +115,7 @@ impl ExternalIoServer {
             routing_table,
             socket,
             global_dopamine: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            dopamine_log_counter: AtomicU32::new(0),
         })
     }
 
@@ -199,7 +201,10 @@ impl ExternalIoServer {
         // Update global dopamine reward for R-STDP
         self.global_dopamine.store(header.global_reward as i32, Ordering::Relaxed);
         if header.global_reward != 0 {
-            println!("💉 [Dopamine] Reward Received: {}", header.global_reward);
+            let n = self.dopamine_log_counter.fetch_add(1, Ordering::Relaxed);
+            if n % 100 == 0 {
+                println!("💉 [Dopamine] Reward Received: {} ({} packets)", header.global_reward, n + 1);
+            }
         }
     }
 

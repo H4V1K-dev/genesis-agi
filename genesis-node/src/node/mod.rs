@@ -104,6 +104,9 @@ impl NodeRuntime {
         // [DOD] Structured Concurrency: Оркестратор спавнит демонов сам
         let daemons = Self::spawn_baker_daemons(&shards);
 
+        // [Windows] Daemon creates SHM file asynchronously; wait for it before shard threads open
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
         let mut compute_dispatchers = HashMap::new();
         let mut shard_receivers = HashMap::new();
         for desc in &shards {
@@ -184,10 +187,11 @@ impl NodeRuntime {
         let daemon_path = exe_path.with_file_name("genesis-baker-daemon");
 
         for desc in shards {
-            let socket_path = genesis_core::ipc::default_socket_path(desc.hash);
-            let _ = std::fs::remove_file(&socket_path);
+            let socket_addr = genesis_core::ipc::default_socket_path(desc.hash);
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(&socket_addr);
 
-            println!("[Orchestrator] Spawning CPU Baker Daemon for zone 0x{:08X} at {:?}", desc.hash, desc.baked_dir);
+            println!("[Orchestrator] Spawning CPU Baker Daemon for zone 0x{:08X} at {:?} (IPC: {})", desc.hash, desc.baked_dir, socket_addr);
             let child = Command::new(&daemon_path)
                 .arg("--zone-hash")
                 .arg(desc.hash.to_string())
@@ -292,7 +296,9 @@ impl NodeRuntime {
                 let out_count = unsafe { std::ptr::read_volatile(channel.out_count_pinned) };
 
                 if out_count > 0 {
-                    println!("🚀 [Egress] Extracted {} spikes for zone 0x{:08X}", out_count, channel.target_zone_hash);
+                    if batch_counter % 100 == 0 {
+                        println!("🚀 [Egress] Extracted {} spikes for zone 0x{:08X} (batch {})", out_count, channel.target_zone_hash, batch_counter);
+                    }
                     self.services.reporter.udp_out_packets.fetch_add(1, Ordering::Relaxed);
                 }
 
