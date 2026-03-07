@@ -18,6 +18,7 @@ pub enum ComputeCommand {
         batch_size: u32,
         global_dopamine: i16,
     },
+    Resurrect, // [DOD] Trigger 100-tick stabilization warmup
     Shutdown,
 }
 
@@ -27,6 +28,7 @@ pub enum ComputeFeedback {
         zone_hash: u32,
         pinned_out_ptr: usize,
         output_bytes: usize,
+        is_warmup: bool, // [DOD] True if shard is stabilizing
     },
 }
 
@@ -243,7 +245,17 @@ impl NodeRuntime {
             for _ in 0..num_dispatchers {
                 if let Ok(feedback) = self.feedback_receiver.recv() {
                     match feedback {
-                        ComputeFeedback::BatchComplete { ticks_processed: _, zone_hash, pinned_out_ptr, output_bytes } => {
+                        ComputeFeedback::BatchComplete { ticks_processed: _, zone_hash, pinned_out_ptr, mut output_bytes, is_warmup } => {
+                            // [DOD] Hardware Gating: Mute all outgoing traffic during Warmup
+                            if is_warmup {
+                                for (_, channel) in &self.network.inter_node_channels {
+                                    if channel.src_zone_hash == zone_hash {
+                                        unsafe { std::ptr::write_volatile(channel.out_count_pinned, 0); }
+                                    }
+                                }
+                                output_bytes = 0; // Mute external IO motors
+                            }
+
                             if output_bytes > 0 {
                                 // Ship outputs to network targets
                                 if let Some(routes) = self.output_routes.get(&zone_hash) {

@@ -51,6 +51,14 @@ cargo run --release -p genesis-node -- --manifest baked/MotorCortex/manifest.tom
 python3 examples/cartpole/cartpole_client.py
 ```
 
+### 4. Остановка всех процессов и очистка
+```bash
+pkill -f genesis-node
+pkill -f genesis-baker-daemon
+rm -f /dev/shm/genesis_shard_*
+rm -rf baked/
+```
+
 ---
 
 ## 🔬 Зона экспериментов

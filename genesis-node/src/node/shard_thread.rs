@@ -473,11 +473,18 @@ pub fn spawn_shard_thread(
             workspace.checkpoint_axons_buffer = vec![0u8; axons_size];
 
             let mut batch_counter: u64 = 0;
+            let mut warmup_ticks_remaining = 0u32; // [DOD FIX]
 
             // 2. Плоский горячий цикл
             while let Ok(cmd) = rx.recv() {
                 match cmd {
+                    ComputeCommand::Resurrect => {
+                        warmup_ticks_remaining = 100;
+                        println!("⚕️ [Shard {:08X}] Entering Warmup Phase (100 ticks)", hash);
+                    }
                     ComputeCommand::RunBatch { tick_base: _, batch_size, global_dopamine } => {
+                        let is_warmup = warmup_ticks_remaining > 0;
+                        
                         // ФАЗА 1: Выполнение GPU батча (Day Phase)
                         execute_day_phase(
                             &mut desc.engine, batch_size, global_dopamine, &ctx.bsp_barrier,
@@ -486,6 +493,13 @@ pub fn spawn_shard_thread(
 
                         // ФАЗА 2: Чтение выходов
                         download_outputs(desc.num_outputs, &mut pinned_out, &io_buffers, output_bytes);
+
+                        if is_warmup {
+                            warmup_ticks_remaining = warmup_ticks_remaining.saturating_sub(batch_size);
+                            if warmup_ticks_remaining == 0 {
+                                println!("✅ [Shard {:08X}] Warmup complete. Voltage stabilized.", hash);
+                            }
+                        }
 
                         // ФАЗА 3: Периодический сброс на диск (I/O)
                         if batch_counter > 0 && batch_counter % 500 == 0 {
@@ -515,6 +529,7 @@ pub fn spawn_shard_thread(
                             zone_hash: hash,
                             pinned_out_ptr: pinned_out.as_ptr() as usize,
                             output_bytes,
+                            is_warmup, // [DOD FIX] Tell orchestrator to mute network
                         }).is_err() { break; }
 
                         batch_counter += 1;
