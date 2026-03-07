@@ -1,15 +1,36 @@
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use clap::Parser;
 
 use genesis_core::ipc::{
-    shm_name, ShmHeader, ShmState,
+    shm_file_path, ShmHeader, ShmState,
     default_socket_path,
 };
 use genesis_core::config::manifest::ZoneManifest;
 use genesis_core::config::blueprints::BlueprintsConfig;
 use genesis_core::constants::MAX_DENDRITE_SLOTS;
+use genesis_core::layout::BurstHeads8;
+
+/// Parses bytes to Vec<u32> without requiring alignment (avoids bytemuck cast_slice).
+fn bytes_to_u32_vec(bytes: &[u8]) -> Vec<u32> {
+    bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+}
+
+/// Parses bytes to Vec<BurstHeads8> without requiring 32-byte alignment.
+fn bytes_to_burst_heads(bytes: &[u8]) -> Vec<BurstHeads8> {
+    bytes.chunks_exact(32)
+        .map(|chunk| BurstHeads8 {
+            h0: u32::from_le_bytes(chunk[0..4].try_into().unwrap()),
+            h1: u32::from_le_bytes(chunk[4..8].try_into().unwrap()),
+            h2: u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+            h3: u32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+            h4: u32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+            h5: u32::from_le_bytes(chunk[20..24].try_into().unwrap()),
+            h6: u32::from_le_bytes(chunk[24..28].try_into().unwrap()),
+            h7: u32::from_le_bytes(chunk[28..32].try_into().unwrap()),
+        })
+        .collect()
+}
 struct NightPhaseContext {
     _baked_dir: PathBuf,
     _layer_ranges: Vec<genesis_baker::bake::axon_growth::LayerZRange>,
@@ -36,6 +57,10 @@ struct NightPhaseContext {
     // [Шаг 4] soma_to_axon маппинг для интеграции новых ghost axons 
     /// soma_to_axon: Vec<u32> — маппинг soma_idx → axon_idx
     _soma_to_axon: Vec<u32>,
+
+    // [Phase 41.2] Types Cache (1 byte per axon) and Whitelist bitmasks
+    _neuron_types_cache: Vec<u8>,
+    _whitelist_masks: [u16; 16],
 }
 
 #[derive(Parser)]
@@ -72,21 +97,24 @@ fn main() {
 
     let shm_len = 64 + weights_size + targets_size + handovers_size;
 
-    // 3. Создаем POSIX Shared Memory (O_CREAT | O_TRUNC выжигает старые данные)
-    let c_name = std::ffi::CString::new(shm_name(cli.zone_hash)).unwrap();
-    let fd = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC, 0o666) };
-    if fd < 0 { panic!("Daemon failed to create SHM"); }
-    unsafe { libc::ftruncate(fd, shm_len as libc::off_t) };
+    // 3. Создаем file-backed shared memory (cross-platform: Linux + Windows)
+    let shm_path = shm_file_path(cli.zone_hash);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&shm_path)
+        .expect("Daemon failed to create SHM file");
+    file.set_len(shm_len as u64).expect("Failed to set SHM size");
 
-    let ptr = unsafe { libc::mmap(std::ptr::null_mut(), shm_len as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0) };
-    
+    let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file).expect("Daemon failed to mmap SHM") };
+
     // 4. Инициализируем заголовок контракта
     let header = ShmHeader::new(cli.zone_hash, padded_n, total_axons);
-    unsafe { std::ptr::write(ptr as *mut ShmHeader, header) };
+    unsafe { std::ptr::write(mmap.as_mut_ptr() as *mut ShmHeader, header) };
 
-    unsafe { libc::close(fd) };
-
-    println!("[Baker Daemon {:08X}] SHM Allocated: {} MB. Listening for IPC...", cli.zone_hash, shm_len / 1024 / 1024);
+    println!("[Baker Daemon {:08X}] SHM Allocated: {} MB at {:?}. Listening for IPC...", cli.zone_hash, shm_len / 1024 / 1024, shm_path);
 
     // Загружаем blueprints.toml для Dale's Law
     let blueprints = load_blueprints(&brain_toml);
@@ -97,26 +125,45 @@ fn main() {
     // [DOD FIX] Кешируем конфиги для inject_ghost_axons — один раз при старте
     let night_ctx = build_night_context(&cli.baked_dir, &brain_toml);
 
-    let socket_path = default_socket_path(zone_hash);
+    let socket_addr = default_socket_path(zone_hash);
 
-    // Удаляем старый сокет если остался от прошлого запуска
-    let _ = std::fs::remove_file(&socket_path);
+    // Keep file open so mmap stays valid
+    let _shm_file = file;
 
-    let listener = UnixListener::bind(&socket_path)
-        .expect(&format!("FATAL: Cannot bind Unix socket {}", socket_path));
-
-    println!("🔌 Listening on {}", socket_path);
-    println!("   Waiting for Night Phase requests from genesis-node...");
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let bp_ref = blueprints.as_ref();
-                if let Err(e) = handle_night_phase(stream, zone_hash, bp_ref, night_ctx.as_ref(), ptr as *mut u8) {
-                    eprintln!("❌ Night Phase error: {}", e);
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(&socket_addr);
+        let listener = std::os::unix::net::UnixListener::bind(&socket_addr)
+            .expect(&format!("FATAL: Cannot bind Unix socket {}", socket_addr));
+        println!("🔌 Listening on {}", socket_addr);
+        println!("   Waiting for Night Phase requests from genesis-node...");
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => {
+                    if let Err(e) = run_night_phase(s, zone_hash, blueprints.as_ref(), night_ctx.as_ref(), mmap.as_mut_ptr() as *mut u8) {
+                        eprintln!("❌ Night Phase error: {}", e);
+                    }
                 }
+                Err(e) => eprintln!("Connection error: {}", e),
             }
-            Err(e) => eprintln!("Connection error: {}", e),
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let listener = std::net::TcpListener::bind(&socket_addr)
+            .expect(&format!("FATAL: Cannot bind TCP {}", socket_addr));
+        println!("🔌 Listening on {}", socket_addr);
+        println!("   Waiting for Night Phase requests from genesis-node...");
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => {
+                    if let Err(e) = run_night_phase(s, zone_hash, blueprints.as_ref(), night_ctx.as_ref(), mmap.as_mut_ptr() as *mut u8) {
+                        eprintln!("❌ Night Phase error: {}", e);
+                    }
+                }
+                Err(e) => eprintln!("Connection error: {}", e),
+            }
         }
     }
 }
@@ -204,11 +251,9 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
         if data.len() > 16 {
             let slice = &data[16..];
             let count = slice.len() / 32;
-            bytemuck::cast_slice(slice)
-                .iter()
-                .take(count.min(total_axons_max as usize))
-                .copied()
-                .collect()
+            let mut heads = bytes_to_burst_heads(slice);
+            heads.truncate(count.min(total_axons_max as usize));
+            heads
         } else {
             vec![genesis_core::layout::BurstHeads8::empty(genesis_core::constants::AXON_SENTINEL); total_axons_max as usize]
         }
@@ -225,10 +270,8 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
         let count = total_axons_max as usize;
         let expected_size = 8 * count;
         if data.len() >= expected_size {
-            let tips = bytemuck::cast_slice::<u8, u32>(&data[0..4*count])
-                .iter().copied().collect();
-            let dirs = bytemuck::cast_slice::<u8, u32>(&data[4*count..8*count])
-                .iter().copied().collect();
+            let tips = bytes_to_u32_vec(&data[0..4 * count]);
+            let dirs = bytes_to_u32_vec(&data[4 * count..8 * count]);
             (tips, dirs)
         } else {
             (vec![0; count], vec![0; count])
@@ -257,10 +300,7 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
             let soma_to_axon_end = soma_to_axon_offset + 4 * (padded_n as usize);
             
             if data.len() >= soma_to_axon_end {
-                bytemuck::cast_slice::<u8, u32>(&data[soma_to_axon_offset..soma_to_axon_end])
-                    .iter()
-                    .copied()
-                    .collect()
+                bytes_to_u32_vec(&data[soma_to_axon_offset..soma_to_axon_end])
             } else {
                 vec![u32::MAX; padded_n as usize]
             }
@@ -268,6 +308,37 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
             vec![u32::MAX; padded_n as usize]
         }
     };
+
+    // [Phase 41.2] Извлечение типов (сдвиг >> 4) из shard.state
+    let neuron_types_cache = {
+        let state_path = baked_dir.join("shard.state");
+        if state_path.exists() {
+            let data = std::fs::read(&state_path).unwrap_or_default();
+            // Структура: [u32 voltages: 4*N] + [u8 flags: N]
+            let flags_offset = 4 * (padded_n as usize);
+            let flags_end = flags_offset + (padded_n as usize);
+            if data.len() >= flags_end {
+                data[flags_offset..flags_end].iter().map(|f| (f >> 4) & 0x0F).collect()
+            } else { vec![0; padded_n as usize] }
+        } else { vec![0; padded_n as usize] }
+    };
+
+    let mut whitelist_masks = [0u16; 16];
+    for (i, nt) in neuron_types.iter().enumerate().take(16) {
+        let mut mask = 0u16;
+        if nt.dendrite_whitelist.is_empty() {
+            mask = 0xFFFF; // All types allowed if whitelist is empty
+        } else {
+            for allowed_name in &nt.dendrite_whitelist {
+                for (j, other_nt) in neuron_types.iter().enumerate().take(16) {
+                    if &other_nt.name == allowed_name {
+                        mask |= 1 << j;
+                    }
+                }
+            }
+        }
+        whitelist_masks[i] = mask;
+    }
 
     Some(NightPhaseContext {
         _baked_dir: baked_dir.clone(),
@@ -282,14 +353,16 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
         _axon_dirs_xyz: axon_dirs_xyz,
         _axon_heads: axon_heads,
         _soma_to_axon: soma_to_axon,
+        _neuron_types_cache: neuron_types_cache,
+        _whitelist_masks: whitelist_masks,
     })
 }
 
-fn handle_night_phase(
-    mut stream: UnixStream,
+fn run_night_phase<S: Read + Write>(
+    mut stream: S,
     _zone_hash: u32,
     blueprints: Option<&BlueprintsConfig>,
-    _ctx: Option<&NightPhaseContext>,
+    ctx: Option<&NightPhaseContext>,
     shm_ptr: *mut u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Read binary BakeRequest (16 bytes)
@@ -328,12 +401,22 @@ fn handle_night_phase(
     };
 
     // 4. CPU Sprouting (Zero-Copy)
+    let empty_cache: &[u8] = &[];
+    let default_masks = [0xFFFF; 16];
+    let (axon_types_cache, whitelist_masks) = if let Some(c) = ctx {
+        (c._neuron_types_cache.as_slice(), &c._whitelist_masks)
+    } else {
+        (empty_cache, &default_masks)
+    };
+
     let new_synapses = genesis_baker::bake::sprouting::run_sprouting_pass(
         targets,
         weights,
         padded_n,
         blueprints,
         hdr.epoch,
+        axon_types_cache,
+        whitelist_masks,
     );
 
     println!("   ↳ Sprouted {} new synapses", new_synapses);

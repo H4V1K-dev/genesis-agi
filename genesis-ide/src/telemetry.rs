@@ -15,11 +15,13 @@ use crate::config::IdeConfig;
 #[derive(Event, Clone)]
 pub struct SpikeFrameEvent {
     pub tick: u64,
+    #[allow(dead_code)]
+    pub dopamine: i16,
     pub spike_ids: Vec<u32>,
 }
 
 #[derive(Resource)]
-pub struct TelemetryReceiver(pub UnboundedReceiver<(u64, Vec<u32>)>);
+pub struct TelemetryReceiver(pub UnboundedReceiver<(u64, i16, Vec<u32>)>);
 
 
 #[derive(Resource, Default)]
@@ -65,8 +67,8 @@ pub fn setup_telemetry_socket(mut commands: Commands, config: Res<IdeConfig>) {
             println!("[Telemetry] Connected. Awaiting frames...");
             while let Some(msg) = ws_stream.next().await {
                 if let Ok(Message::Binary(data)) = msg {
-                    if let Some((tick, spike_ids)) = decode_telemetry_frame(&data) {
-                        let _ = tx.send((tick, spike_ids));
+                    if let Some((tick, dopamine, spike_ids)) = decode_telemetry_frame(&data) {
+                        let _ = tx.send((tick, dopamine, spike_ids));
                     }
                 }
             }
@@ -76,32 +78,36 @@ pub fn setup_telemetry_socket(mut commands: Commands, config: Res<IdeConfig>) {
     commands.insert_resource(TelemetryReceiver(rx));
 }
 
-fn decode_telemetry_frame(data: &[u8]) -> Option<(u64, Vec<u32>)> {
-    if data.len() < 16 { return None; }
+fn decode_telemetry_frame(data: &[u8]) -> Option<(u64, i16, Vec<u32>)> {
+    if data.len() < 20 { return None; }
     
     // SPIK magic check
     if &data[0..4] != b"SPIK" { return None; }
     
     let tick = u64::from_le_bytes(data[4..12].try_into().unwrap());
     let count = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+    let dopamine = i16::from_le_bytes(data[16..18].try_into().unwrap());
     
-    if data.len() < 16 + count * 4 { return None; }
+    if data.len() < 20 + count * 4 { return None; }
     
-    let spikes = data[16..]
+    let spikes = data[20..]
         .chunks_exact(4)
         .take(count)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect();
         
-    Some((tick, spikes))
+    Some((tick, dopamine, spikes))
 }
 
 pub fn drain_telemetry_socket(
     mut receiver: ResMut<TelemetryReceiver>,
     mut ev_writer: EventWriter<SpikeFrameEvent>,
 ) {
-    while let Ok((tick, spike_ids)) = receiver.0.try_recv() {
-        ev_writer.send(SpikeFrameEvent { tick, spike_ids });
+    while let Ok((tick, dopamine, spike_ids)) = receiver.0.try_recv() {
+        if !spike_ids.is_empty() {
+            bevy::log::info!("Telemetry tick: {}, Dopamine: {}, Spikes: {}", tick, dopamine, spike_ids.len());
+        }
+        ev_writer.send(SpikeFrameEvent { tick, dopamine, spike_ids });
     }
 }
 

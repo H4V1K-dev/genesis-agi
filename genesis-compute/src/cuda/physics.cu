@@ -190,7 +190,11 @@ __global__ void cu_update_neurons_kernel(ShardVramPtrs vram,
   // Инверсия (~) даст 0x00000000. В итоге decayed & 0 = 0.
   thresh_offset = decayed & ~(decayed >> 31);
 
-  current_voltage += i_in - p.leak_rate;
+  // [DOD] Точная утечка к rest_potential без integer-зависания
+  int32_t v_diff = current_voltage - p.rest_potential;
+  int32_t abs_diff = abs(v_diff);
+  int32_t leak_val = (abs_diff < p.leak_rate) ? v_diff : (v_diff / p.leak_rate);
+  current_voltage -= leak_val;
 
   // [DOD] Branchless Clamp: floor at rest_potential to prevent infinite voltage
   // debt If current_voltage < rest_potential, diff is negative, (diff >> 31) =
@@ -199,6 +203,10 @@ __global__ void cu_update_neurons_kernel(ShardVramPtrs vram,
   // rest_potential.
   int32_t diff = current_voltage - p.rest_potential;
   current_voltage = p.rest_potential + (diff & ~(diff >> 31));
+
+  // [DOD] Threshold Soft Cap: нейрон не может поднять порог выше 10x от базового
+  int32_t max_off = p.threshold * 10;
+  thresh_offset = (thresh_offset > max_off) ? max_off : thresh_offset;
 
   int32_t effective_threshold = p.threshold + thresh_offset;
 
@@ -275,12 +283,18 @@ __global__ void cu_apply_gsop_kernel(ShardVramPtrs vram, uint32_t padded_n) {
     int32_t inertia = p.inertia_curve[rank];
 
     // 2. Modulated Potentiation / Depression
-    int32_t base_pot = p.gsop_potentiation;
-    int32_t dopa_mod = (base_pot * current_dopamine) >> 8;
-    int32_t final_pot = base_pot + dopa_mod;
+    // [DOD] Symmetric Dopamine Modulation
+    // current_dopamine: i16 (0 = нейтрально, >0 = награда, <0 = наказание)
+    // База 256 (1.0x). Множитель >> 8.
+    int32_t dopa_factor = 256 + (int32_t)current_dopamine; 
+    dopa_factor = max(0, dopa_factor); // Защита от полной инверсии знака веса
 
-    int32_t delta_pot = (final_pot * inertia) >> 7;
-    int32_t delta_dep = (p.gsop_depression * inertia) >> 7;
+    // Применяем инерцию и дофамин. Итоговый сдвиг >> 15 (7 инерция + 8 дофамин)
+    int32_t delta_pot = (p.gsop_potentiation * inertia * dopa_factor) >> 15;
+    
+    // Наказание (dopa < 0) уменьшает dopa_factor, значит (512 - dopa_factor) растет -> LTD усиливается
+    int32_t delta_dep = (p.gsop_depression * inertia * (512 - dopa_factor)) >> 15;
+
     // Экспоненциальный сдвиг. Каждые 16 тиков сила обучения падает вдвое (>> 1)
     uint32_t cooling_shift = is_active ? (min_dist >> 4) : 0;
 
@@ -322,6 +336,47 @@ __global__ void cu_record_readout_kernel(const uint8_t* __restrict__ soma_flags,
   }
 
   output_history[tid] = is_spiking;
+}
+
+// ============================================================================
+// 7. Telemetry Extraction Kernel (Warp-Aggregated Atomics via PCIe)
+// ============================================================================
+__global__ void cu_extract_telemetry_kernel(
+    const uint8_t* __restrict__ flags,
+    uint32_t* __restrict__ out_ids,
+    uint32_t* __restrict__ out_count,
+    uint32_t padded_n
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t lane_id = threadIdx.x % 32;
+
+    bool is_spiking = false;
+    if (tid < padded_n) {
+        is_spiking = (flags[tid] & 0x01) != 0;
+    }
+
+    // 1. Узнаем, кто в варпе спайкует (1 такт ALU)
+    uint32_t mask = __ballot_sync(0xFFFFFFFF, is_spiking);
+    if (mask == 0) return; // Early Exit: шина PCIe свободна
+
+    // 2. Считаем общее количество спайков в варпе (1 такт ALU)
+    uint32_t warp_count = __popc(mask);
+    uint32_t leader = __ffs(mask) - 1; 
+
+    // 3. Лидер делает ОДНУ атомарную транзакцию по PCIe
+    uint32_t base_idx;
+    if (lane_id == leader) {
+        base_idx = atomicAdd(out_count, warp_count);
+    }
+
+    // 4. Лидер раздает базовый индекс всему варпу (1 такт)
+    base_idx = __shfl_sync(mask, base_idx, leader);
+
+    // 5. Каждый поток вычисляет свое смещение и пишет в массив 1 раз
+    if (is_spiking) {
+        uint32_t my_offset = __popc(mask & ((1 << lane_id) - 1));
+        out_ids[base_idx + my_offset] = tid;
+    }
 }
 
 extern "C" {
@@ -382,6 +437,14 @@ int32_t cu_step_day_phase(const ShardVramPtrs *vram, uint32_t padded_n,
 // Позволяет заливать параметры вариантов в константную память GPU
 int32_t cu_upload_constant_memory(const VariantParameters *lut) {
   return cudaMemcpyToSymbol(VARIANT_LUT, lut, sizeof(VariantParameters) * 16);
+}
+
+void launch_extract_telemetry(const ShardVramPtrs* vram, uint32_t padded_n, uint32_t* out_ids, uint32_t* out_count_pinned, cudaStream_t stream) {
+    int threads = 256;
+    int blocks = (padded_n + threads - 1) / threads;
+    cu_extract_telemetry_kernel<<<blocks, threads, 0, stream>>>(
+        vram->soma_flags, out_ids, out_count_pinned, padded_n
+    );
 }
 
 } // extern "C"

@@ -17,6 +17,7 @@ pub enum ComputeCommand {
         tick_base: u32,
         batch_size: u32,
         global_dopamine: i16,
+        telemetry_ptrs: Option<(usize, usize)>,
     },
     Shutdown,
 }
@@ -51,6 +52,7 @@ pub struct NodeServices {
     pub routing_table: Arc<RoutingTable>,
     pub bsp_barrier: Arc<BspBarrier>,
     pub reporter: Arc<crate::simple_reporter::SimpleReporter>,
+    pub telemetry_swapchain: Arc<crate::network::telemetry::TelemetrySwapchain>,
 }
 
 pub struct NodeRuntime {
@@ -81,7 +83,7 @@ impl NodeRuntime {
         io_server: Arc<ExternalIoServer>,
         routing_table: Arc<RoutingTable>,
         bsp_barrier: Arc<BspBarrier>,
-        _telemetry_swapchain: Arc<crate::network::telemetry::TelemetrySwapchain>,
+        telemetry_swapchain: Arc<crate::network::telemetry::TelemetrySwapchain>,
         local_ip: std::net::Ipv4Addr,
         local_port: u16,
         output_routes: HashMap<u32, Vec<(String, u32)>>,
@@ -101,6 +103,9 @@ impl NodeRuntime {
 
         // [DOD] Structured Concurrency: Оркестратор спавнит демонов сам
         let daemons = Self::spawn_baker_daemons(&shards);
+
+        // [Windows] Daemon creates SHM file asynchronously; wait for it before shard threads open
+        std::thread::sleep(std::time::Duration::from_millis(1500));
 
         let mut compute_dispatchers = HashMap::new();
         let mut shard_receivers = HashMap::new();
@@ -149,6 +154,7 @@ impl NodeRuntime {
                 routing_table,
                 bsp_barrier,
                 reporter,
+                telemetry_swapchain,
             },
             network: NetworkTopology {
                 intra_gpu_channels,
@@ -181,10 +187,11 @@ impl NodeRuntime {
         let daemon_path = exe_path.with_file_name("genesis-baker-daemon");
 
         for desc in shards {
-            let socket_path = genesis_core::ipc::default_socket_path(desc.hash);
-            let _ = std::fs::remove_file(&socket_path);
+            let socket_addr = genesis_core::ipc::default_socket_path(desc.hash);
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(&socket_addr);
 
-            println!("[Orchestrator] Spawning CPU Baker Daemon for zone 0x{:08X} at {:?}", desc.hash, desc.baked_dir);
+            println!("[Orchestrator] Spawning CPU Baker Daemon for zone 0x{:08X} at {:?} (IPC: {})", desc.hash, desc.baked_dir, socket_addr);
             let child = Command::new(&daemon_path)
                 .arg("--zone-hash")
                 .arg(desc.hash.to_string())
@@ -227,11 +234,15 @@ impl NodeRuntime {
             if num_dispatchers == 0 {
                 println!("[!] ERROR: No compute dispatchers found!");
             }
+            let tele_ids = self.services.telemetry_swapchain.back_buffer.load(Ordering::Relaxed) as usize;
+            let tele_count = self.services.telemetry_swapchain.count_buffer.as_ptr() as usize;
+
             for tx in self.compute_dispatchers.values() {
                 let _ = tx.send(ComputeCommand::RunBatch {
                     tick_base: current_tick as u32,
                     batch_size,
                     global_dopamine: current_dopamine,
+                    telemetry_ptrs: Some((tele_ids, tele_count)),
                 });
             }
 
@@ -274,12 +285,20 @@ impl NodeRuntime {
             // [DOD] 5. GPU Barrier Sync (дожидаемся завершения физики, sync_ghosts и экстракции)
             unsafe { genesis_compute::ffi::gpu_stream_synchronize(std::ptr::null_mut()); }
 
+            // 5.1 Telemetry Commit (Strictly AFTER GPU Sync to guarantee visibility in Pinned RAM)
+            if self.services.telemetry_swapchain.active_clients.load(Ordering::Acquire) > 0 {
+                let count = unsafe { *self.services.telemetry_swapchain.count_buffer.as_ptr() };
+                self.services.telemetry_swapchain.swap_and_ready(count as usize, current_tick as u64, current_dopamine);
+            }
+
             // [DOD] 6. Inter-Node Fast Path (Egress)
             for (_, channel) in &self.network.inter_node_channels {
                 let out_count = unsafe { std::ptr::read_volatile(channel.out_count_pinned) };
 
                 if out_count > 0 {
-                    println!("🚀 [Egress] Extracted {} spikes for zone 0x{:08X}", out_count, channel.target_zone_hash);
+                    if batch_counter % 100 == 0 {
+                        println!("🚀 [Egress] Extracted {} spikes for zone 0x{:08X} (batch {})", out_count, channel.target_zone_hash, batch_counter);
+                    }
                     self.services.reporter.udp_out_packets.fetch_add(1, Ordering::Relaxed);
                 }
 

@@ -1,4 +1,3 @@
-
 use genesis_core::layout::VramState;
 use genesis_core::ipc::SpikeEvent;
 use std::sync::Mutex;
@@ -184,10 +183,10 @@ pub extern "C" fn launch_record_readout(
 
 #[no_mangle]
 pub extern "C" fn launch_sort_and_prune(
-    _vram: VramState,
-    prune_threshold: i16,
+    _ptrs: *const crate::ffi::ShardVramPtrs,
+    _padded_n: u32,
 ) {
-    log_call("SortAndPrune", prune_threshold as usize);
+    log_call("SortAndPrune", 0);
 }
 
 #[no_mangle]
@@ -197,6 +196,7 @@ pub extern "C" fn launch_extract_outgoing_spikes(
     _dst_ghost_ids: *const u32,
     _count: u32,
     _sync_batch_ticks: u32,
+    _v_seg: u32,
     _out_events: *mut c_void,
     _out_count: *mut u32,
     _stream: *mut c_void,
@@ -213,16 +213,9 @@ pub extern "C" fn launch_ghost_sync(
 ) {}
 
 #[no_mangle]
-pub extern "C" fn gpu_reset_telemetry_count(
-    _vram: VramState,
-    _stream: *mut c_void,
-) {
-    log_call("ResetTelemetryCount", 0);
-}
-
-#[no_mangle]
 pub extern "C" fn launch_extract_telemetry(
-    _vram: VramState,
+    _vram: *const crate::ffi::ShardVramPtrs,
+    _padded_n: u32,
     _out_ids: *mut u32,
     out_count_pinned: *mut u32,
     _stream: *mut c_void,

@@ -4,7 +4,7 @@ use std::ptr;
 use crossbeam::channel::Receiver;
 use genesis_compute::ShardEngine;
 use genesis_core::config::InstanceConfig;
-use genesis_core::ipc::{AxonHandoverEvent, shm_name, shm_size, ShmHeader};
+use genesis_core::ipc::{AxonHandoverEvent, shm_size, ShmHeader};
 use memmap2::MmapMut;
 use std::fs::OpenOptions;
 use crate::network::bsp::BspBarrier;
@@ -47,36 +47,48 @@ pub struct ThreadWorkspace {
 
 impl ThreadWorkspace {
     pub fn new(zone_hash: u32, padded_n: usize) -> Self {
-        let name = shm_name(zone_hash);
-        let path = format!("/dev/shm{}", name);
-        
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .expect("Failed to create SHM file");
-        
+        let path = genesis_core::ipc::shm_file_path(zone_hash);
         let total_size = shm_size(padded_n);
-        file.set_len(total_size as u64).expect("Failed to set SHM size");
-        
-        let mut mmap = unsafe { MmapMut::map_mut(&file).expect("Failed to mmap SHM") };
-        
-        // Инициализируем заголовок контракта (Node владеет жизненным циклом)
-        let header = ShmHeader::new(zone_hash, padded_n as u32, 0); 
-        unsafe {
-            std::ptr::write(mmap.as_mut_ptr() as *mut ShmHeader, header);
-        }
 
-        Self {
-            weights_offset: header.weights_offset as usize,
-            targets_offset: header.targets_offset as usize,
-            handovers_offset: header.handovers_offset as usize,
-            shm_buffer: mmap,
-            checkpoint_state_buffer: vec![0u8; 0], // Will be resized in spawn
-            checkpoint_axons_buffer: vec![0u8; 0], // Will be resized in spawn
+        // Daemon creates the file; retry until valid header (race: daemon may not be ready yet)
+        for _ in 0..30 {
+            let file = match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+            {
+                Ok(f) => f,
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+            };
+            if file.metadata().map(|m| m.len()).unwrap_or(0) < total_size as u64 {
+                let _ = file.set_len(total_size as u64);
+            }
+            let mmap = match unsafe { MmapMut::map_mut(&file) } {
+                Ok(m) => m,
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+            };
+            let header = unsafe { std::ptr::read(mmap.as_ptr() as *const ShmHeader) };
+            if header.validate().is_ok() {
+                return Self {
+                    weights_offset: header.weights_offset as usize,
+                    targets_offset: header.targets_offset as usize,
+                    handovers_offset: header.handovers_offset as usize,
+                    shm_buffer: mmap,
+                    checkpoint_state_buffer: vec![0u8; 0],
+                    checkpoint_axons_buffer: vec![0u8; 0],
+                };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        panic!("SHM file {:?} not ready after 3s (is genesis-baker-daemon running?)", path);
     }
 
     pub fn weights_slice_mut(&mut self, padded_n: usize) -> &mut [i16] {
@@ -147,7 +159,7 @@ fn execute_day_phase(
         None
     };
 
-    if batch_counter % 10 == 0 {
+    if batch_counter % 100 == 0 {
         println!("🔍 [Shard I/O] v_offset: {}, v_axons: {}, v_seg: {}", virtual_offset, num_virtual_axons, v_seg);
         if let Some(slice) = input_slice {
             let active = slice.iter().any(|&w| w != 0);
@@ -238,7 +250,6 @@ fn execute_night_phase(
     shard_config: &InstanceConfig,
     rt_handle: &tokio::runtime::Handle,
     workspace: &mut ThreadWorkspace,
-    prune_threshold: i16, // [DOD FIX] Передаем динамический порог
 ) {
     let padded_n = shard.vram.padded_n as usize;
     let dendrites_count = padded_n * genesis_core::constants::MAX_DENDRITE_SLOTS;
@@ -282,7 +293,7 @@ fn execute_night_phase(
             &incoming_handovers,
             padded_n,
             std::time::Duration::from_secs(10),
-            prune_threshold,
+            0, // [DOD FIX] run_night is still expected to receive prune_threshold, we mock 0
         ) {
             Ok(()) => {
                 unsafe {
@@ -332,6 +343,8 @@ fn dispatch_handovers(
     let mut x_minus = Vec::new();
     let mut y_plus = Vec::new();
     let mut y_minus = Vec::new();
+    let mut z_plus = Vec::new();
+    let mut z_minus = Vec::new();
 
     let max_x = shard_config.dimensions.w as u16;
     let max_y = shard_config.dimensions.d as u16;
@@ -345,6 +358,10 @@ fn dispatch_handovers(
             y_plus.push(*ev);
         } else if ev.entry_y == 0 {
             y_minus.push(*ev);
+        } else if ev.vector_z > 0 {
+            z_plus.push(*ev);
+        } else if ev.vector_z < 0 {
+            z_minus.push(*ev);
         }
     }
 
@@ -368,6 +385,16 @@ fn dispatch_handovers(
     if !y_minus.is_empty() {
         if let Some(ref addr) = neighbors.y_minus {
             routes_to_execute.push((addr.clone(), y_minus));
+        }
+    }
+    if !z_plus.is_empty() {
+        if let Some(ref addr) = neighbors.z_plus {
+            routes_to_execute.push((addr.clone(), z_plus));
+        }
+    }
+    if !z_minus.is_empty() {
+        if let Some(ref addr) = neighbors.z_minus {
+            routes_to_execute.push((addr.clone(), z_minus));
         }
     }
 
@@ -465,12 +492,25 @@ pub fn spawn_shard_thread(
             // 2. Плоский горячий цикл
             while let Ok(cmd) = rx.recv() {
                 match cmd {
-                    ComputeCommand::RunBatch { tick_base: _, batch_size, global_dopamine } => {
+                    ComputeCommand::RunBatch { tick_base: _, batch_size, global_dopamine, telemetry_ptrs } => {
                         // ФАЗА 1: Выполнение GPU батча (Day Phase)
                         execute_day_phase(
                             &mut desc.engine, batch_size, global_dopamine, &ctx.bsp_barrier,
                             &ctx.io_ctx, &io_buffers, desc.virtual_offset, desc.num_virtual_axons, mapped_soma_ids, desc.v_seg, batch_counter
                         );
+
+                        if let Some((ids_ptr, count_ptr)) = telemetry_ptrs {
+                            unsafe {
+                                std::ptr::write_volatile(count_ptr as *mut u32, 0);
+                                genesis_compute::ffi::launch_extract_telemetry(
+                                    &desc.engine.vram.ptrs,
+                                    desc.engine.vram.padded_n,
+                                    ids_ptr as *mut u32,
+                                    count_ptr as *mut u32,
+                                    std::ptr::null_mut(), // stream 0
+                                );
+                            }
+                        }
 
                         // ФАЗА 2: Чтение выходов
                         download_outputs(desc.num_outputs, &mut pinned_out, &io_buffers, output_bytes);
@@ -489,11 +529,9 @@ pub fn spawn_shard_thread(
                         // ФАЗА 4: Обслуживание графа (Night Phase)
                         let current_tick_count = (batch_counter + 1) * batch_size as u64;
                         if ctx.night_interval > 0 && current_tick_count % ctx.night_interval == 0 {
-                            let current_prune_threshold = 15; // [DOD FIX] TODO: брать из конфига
                             execute_night_phase(
                                 &mut desc.engine, hash, std::path::Path::new(&socket_path), &mut baker_client,
                                 &ctx.incoming_grow, &desc.config, &ctx.rt_handle, &mut workspace,
-                                current_prune_threshold
                             );
                         }
 

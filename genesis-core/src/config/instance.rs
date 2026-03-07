@@ -40,6 +40,8 @@ pub struct Neighbors {
     pub x_minus: Option<String>,
     pub y_plus: Option<String>,
     pub y_minus: Option<String>,
+    pub z_plus: Option<String>,
+    pub z_minus: Option<String>,
 }
 
 impl InstanceConfig {
