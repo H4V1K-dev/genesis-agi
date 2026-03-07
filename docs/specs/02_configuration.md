@@ -381,6 +381,9 @@ sprouting_weight_distance = 0.5  # f32. Ближний = лучше
 sprouting_weight_power   = 0.4  # f32. soma_power_index (См. 04_connectivity.md §1.6.1)
 sprouting_weight_explore = 0.1  # f32. Шум по эпохе (защита от повторных выборов)
 
+# --- Спонтанная активность (Фоновый шум) ---
+spontaneous_firing_period_ticks = 500  # Спайк в среднем раз в 500 тиков (0 = отключено)
+
 [[neuron_type]]
 # ID 3 (Биты: 11) — Тормозной интернейрон
 name = "Horizontal_Inhibitory"
@@ -409,6 +412,42 @@ slot_decay_wm = 80               # 80/128 = 0.625× (агрессивный ра
 sprouting_weight_distance = 0.6  # Больше ценят локальные связи
 sprouting_weight_power   = 0.3  # Меньше зависимость от хабов
 sprouting_weight_explore = 0.1
+
+# --- Спонтанная активность (Фоновый шум) ---
+spontaneous_firing_period_ticks = 200  # Тормозные — чаще срабатывают (раз в 200 тиков)
+```
+
+### 6.3. Компиляция DDS Heartbeat
+
+Baker преобразует человеко-читаемый `spontaneous_firing_period_ticks` во фракционный множитель `heartbeat_m` для GPU (см. [03_neuron_model.md §4.1](./03_neuron_model.md#41-математика-zero-cost-branchless)):
+
+- Если `period == 0`: `heartbeat_m = 0` (спонтанная активность отключена).
+- Иначе: `heartbeat_m = clamp(65536 / period, 1, 65535)` (распределение фазы DDS).
+
+**Примеры расчёта:**
+- `period = 500` → `heartbeat_m = 65536 / 500 ≈ 131` → В среднем 1 спайк на 500 тиков
+- `period = 200` → `heartbeat_m = 65536 / 200 ≈ 328` → В среднем 1 спайк на 200 тиков
+- `period = 1` → `heartbeat_m = 65535` → Каждый тик срабатывает (spike generator, не рекомендуется)
+
+**Реализация (Baking Tool):**
+
+```rust
+// genesis-baker/src/compile_heartbeat.rs
+
+pub fn compile_dds_heartbeat(period_ticks: u32) -> u16 {
+    if period_ticks == 0 {
+        return 0;  // Отключено
+    }
+    
+    // DDS фаза: 0..65535 (16 битов)
+    let heartbeat_m = (65536 / period_ticks.max(1)).min(65535) as u16;
+    
+    // Проверка пределов
+    assert!(heartbeat_m > 0, "period_ticks > 65536 is invalid (heartbeat too rare)");
+    assert!(heartbeat_m <= 65535, "Critical: heartbeat_m overflow");
+    
+    heartbeat_m
+}
 ```
 
 ---

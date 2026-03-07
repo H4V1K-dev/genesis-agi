@@ -65,8 +65,9 @@ struct VariantParameters {
     uint8_t slot_decay_wm;                  // 1 б. — Множитель GSOP для WM (80-127). Fixed: 128 = 1.0×
     uint8_t signal_propagation_length;      // 1 б. — Active Tail length
     uint8_t ltm_slot_count;                 // 1 б. — LTM vs WM threshold boundary
+    uint16_t heartbeat_m;                   // 2 б. — DDS Heartbeat множитель (0 = отключено, 1..65535)
     uint8_t inertia_curve[16];              // 16 б. — Inertia modifiers (rank: abs(weight) >> 11)
-    uint8_t _padding[14];                   // 14 б. → Total = 64 bytes
+    uint8_t _padding[12];                   // 12 б. → Total = 64 bytes
 };
 
 // Контейнер для 16 вариантов

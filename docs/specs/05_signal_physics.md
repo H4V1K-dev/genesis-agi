@@ -265,18 +265,28 @@ __global__ void update_neurons_kernel(
         }
     }
 
-    // 6. Threshold Check & Fire (Branchless)
+    // 6. Threshold Check, DDS Heartbeat & Fire (Branchless)
     i32 eff_threshold = p.threshold + t_off;
-    i32 is_spiking = (v >= eff_threshold) ? 1 : 0;
+    i32 is_glif_spiking = (v >= eff_threshold) ? 1 : 0;
+    
+    // DDS Phase Accumulator (§4 neuron_model.md)
+    // Пространственное рассеивание фазы: tid * 104729 (простое число)
+    u32 phase = (current_tick * p.heartbeat_m + tid * 104729) & 0xFFFF;
+    i32 is_heartbeat = (phase < p.heartbeat_m) ? 1 : 0;
 
-    // Branchless state update
-    v     = is_spiking * p.rest_potential + (1 - is_spiking) * v;
-    ref_timer = is_spiking * p.refractory_period;
-    t_off += is_spiking * p.homeostasis_penalty;
-    f     = (f & 0xFE) | (u8)is_spiking;
+    // Итоговый спайк (ГЛИФ ИЛИ Heartbeat)
+    i32 final_spike = is_glif_spiking | is_heartbeat;
+
+    // Мембрана и гомеостаз сбрасываются ТОЛЬКО от GLIF-спайка (Heartbeat их не трогает)
+    v     = is_glif_spiking * p.rest_potential + (1 - is_glif_spiking) * v;
+    ref_timer = is_glif_spiking * p.refractory_period;
+    t_off += is_glif_spiking * p.homeostasis_penalty;
+    
+    // Флаг активности устанавливается от ЛЮБОГО спайка (нужно для GSOP)
+    f     = (f & 0xFE) | (u8)final_spike;
 
     // 7. Сдвиг голов аксона при спайке (Burst Shift)
-    if (is_spiking) {
+    if (final_spike) {
         u32 my_axon = soma_to_axon[tid];
         if (my_axon != 0xFFFFFFFF) {
             BurstHeads8 h = axon_heads[my_axon];

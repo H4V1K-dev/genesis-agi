@@ -8,6 +8,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.247.30] - 2026-03-07 15:24:24
+
+**Zero-Downtime Recovery Integration**
+
+### Added
+- Add ComputeCommand::Resurrect and is_warmup flag for ComputeFeedback::BatchComplete in genesis-node/src/node/mod.rs
+- Implement hardware gating of outgoing network traffic in run_node_loop by zeroing DMA counters (channel.out_count_pinned) when is_warmup flag is received
+- Add warmup_ticks_remaining state variable in genesis-node/src/node/shard_thread.rs
+- Decrement timer during execute_day_phase and download_outputs, sending is_warmup: true status back to orchestrator while timer > 0
+- Implement broadcast_route_update in genesis-node/src/node/recovery.rs, sending ROUTE_UPDATE packet with magic: ROUT_MAGIC to all live peers in routing_table
+- Add resurrect_shard() function that broadcasts route to all nodes and commands local shard_thread to enter Warmup mode
+- Fix minor ComputeCommand import issue and run cargo check --workspace successfully
+
+## [0.244.29] - 2026-03-07 15:01:47
+
+**Implement Strict Dale's Law with Activity-Based Nudging and Clean Legacy**
+
+### Added
+- Implement run_sprouting_pass with strict Dale's Law using 4-bit type mask from axon_tips_uvw
+- Add nudge_axon function for activity-based nudging: local axons shift only if soma spiked (flags[soma_idx] & 0x01 != 0), ghost/virtual axons shift unconditionally
+- Compute new_synapses using updated CPU Sprouting logic in genesis_baker::bake::sprouting::run_sprouting_pass
+- Modify build_night_context to return mutable NightPhaseContext (night_ctx now mut)
+- Update run_night_phase call to accept ctx: Option<&mut NightPhaseContext>
+- Extract VRAM slice flags using correct offset from header hdr.flags_offset
+- Delete genesis-node/src/orchestrator/sprouting.rs file entirely
+- Remove pub mod sprouting; declaration from genesis-node/src/orchestrator/mod.rs
+
+## [0.237.29] - 2026-03-07 14:56:43
+
+**Warp-Aggregated Telemetry with Zero Atomics & C-ABI Fixes**
+
+### Added
+- Fix C-ABI signatures in `genesis-compute/src/ffi.rs` to pass `VramState` as a `*const ShardVramPtrs` pointer instead of by value
+- Update `gpu_reset_telemetry_count` and `launch_extract_telemetry` signatures to accept `vram: *const ShardVramPtrs` and `padded_n: u32`
+- Apply identical fixes to `genesis-compute/src/mock_ffi.rs`, including adding the import for `ShardVramPtrs`
+- Rename and implement `cu_extract_telemetry_kernel` in `genesis-compute/src/cuda/physics.cu`
+- Utilize warp-level primitives `__ballot_sync`, `__popc`, and `__shfl_sync` to perform exactly one `atomicAdd` per warp of 32 threads
+- Update C-wrapper functions in `genesis-compute/src/cuda/bindings.cu` to accept `const ShardVramPtrs* ptrs`
+- Move `gpu_reset_telemetry_count` and `launch_extract_telemetry` implementations lower in the file to resolve C++ compiler visibility error for `ShardVramPtrs`
+- Update `CHANGELOG.md` and `examples/cartpole/readme.md`
+- Run `cargo check --workspace` to verify successful compilation and FFI signature alignment
+
 ## [0.233.29] - 2026-03-07 14:18:18
 
 **Implement Warp-Aggregated Telemetry with Zero-Copy Atomics**

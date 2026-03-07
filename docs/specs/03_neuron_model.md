@@ -185,3 +185,54 @@ gsop_depression = 2
   - **Эффективный порог:** `threshold + threshold_offset`.
 - **Поведенческий эффект (Habituation):** Постоянный стимул (шум вентилятора) → нейрон сначала реагирует, потом «скучает» и замолкает. Сильный новый стимул → пробивает выросший порог. Это база для внимания.
 - **Burst Mode:** Если стимул реально сильный — нейрон выдаёт пачку спайков (penalty накапливается, но каждый спайк проходит). При постоянном шуме порог задирается и нейрон замолкает.
+
+---
+
+## 4. Спонтанная Активность (DDS Heartbeat)
+
+В биологических сетях существует базовый уровень фоновой активности (Spontaneous Firing Rate), необходимый для поддержания гомеостаза и выживания синапсов (GSOP). 
+
+Для генерации спонтанных спайков без хранения состояния таймера в каждом нейроне (что уничтожило бы VRAM), применяется паттерн **Direct Digital Synthesis (DDS) / Fractional Phase Accumulator**.
+
+### 4.1. Математика (Zero-Cost Branchless)
+
+Частота задается через 16-битный множитель `heartbeat_m` (0 = отключено). Фаза вычисляется математически на лету:
+
+```cpp
+// 104729 — простое число для детерминированного пространственного рассеивания (Spatial Scattering).
+// Предотвращает одновременный залп всего варпа.
+uint32_t phase = (current_tick * heartbeat_m + tid * 104729) & 0xFFFF;
+bool is_heartbeat = phase < heartbeat_m;
+```
+
+Это требует ровно **4 такта ALU** (IMUL, IADD, IAND, ICMP) и **0 ветвлений**.
+
+### 4.2. Физиологический контракт Пейсмейкера
+
+Спонтанный прорыв (Heartbeat) кардинально отличается от обычного GLIF-спайка:
+
+- **Сигнал идёт в аксон:** Нейрон выбрасывает импульс (`axon_heads[my_axon] = 0`).
+- **GSOP триггерится:** Флаг `is_spiking` устанавливается в 1 (критично для выживания связей).
+- **Мембрана не сбрасывается:** Heartbeat **НЕ** сбрасывает `voltage`, **НЕ** обнуляет `refractory_timer` и **НЕ** добавляет `homeostasis_penalty`. Это фоновый шум, который не сжигает накопленный мембранный потенциал.
+
+**Итоговая логика (см. [05_signal_physics.md §1.5](./05_signal_physics.md))**
+
+```cuda
+// Спайк ГЛИФ (пороговый)
+i32 is_glif_spiking = (voltage >= effective_threshold) ? 1 : 0;
+
+// Спайк Heartbeat (спонтанный)
+u32 phase = (current_tick * heartbeat_m + tid * 104729) & 0xFFFF;
+i32 is_heartbeat = (phase < heartbeat_m) ? 1 : 0;
+
+// Итоговый спайк
+i32 final_spike = is_glif_spiking | is_heartbeat;
+
+// Состояние сбрасывается ТОЛЬКО от GLIF-спайка
+voltage    = is_glif_spiking * rest_potential + (1 - is_glif_spiking) * voltage;
+ref_timer  = is_glif_spiking * refractory_period;
+threshold_offset += is_glif_spiking * homeostasis_penalty;
+
+// Флаг активности устанавливается от ЛЮБОГО спайка (нужно для GSOP)
+flags = (flags & 0xFE) | (u8)final_spike;
+```
