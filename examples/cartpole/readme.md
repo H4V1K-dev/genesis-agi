@@ -15,13 +15,27 @@
 cd $(find ~/Genesis -type d -name "cartpole" -print -quit)
 ```
 
-При первом запуске необходимо установить зависимости:
+При первом запуске необходимо создать виртуальное окружение и установить зависимости:
 ```bash
-pip install -r examples/cartpole/requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install numpy matplotlib gymnasium pygame
 ```
 Собрать проект:
 ```bash
 cargo build --release
+```
+
+## 📊 Как увидеть результаты?
+
+- Посмотреть дебаг исходного файла `shard.state`:
+```bash
+python3 scripts/brain_debugger.py baked/MotorCortex/shard.state
+```
+
+- (После экспериментов) Посмотреть дебаг последнего чекпоинта:
+```bash
+python3 scripts/brain_debugger.py baked/MotorCortex/checkpoint.state
 ```
 
 Для тестирования необходимо сначала запечь сеть, поднять две ноды (коры) и запустить Python-клиент с самим окружением.
@@ -63,7 +77,7 @@ rm -rf baked/
 
 ## 🔬 Зона экспериментов
 
-Успешный запуск — это уже победа! Но главная цель: **преодолеть затухание сети и побить рекорд в 19 баллов.**
+Успешный запуск — это уже победа! Но главная цель: **преодолеть затухание сети и побить рекорд в 71 балл.**
 
 Что можно менять:
 - **Настройки нейронов:** редактируйте параметры в файлах `blueprints.toml`

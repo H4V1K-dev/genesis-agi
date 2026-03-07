@@ -8,6 +8,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.266.30] - 2026-03-07 16:41:18
+
+*** Add heartbeat_m field to VariantParameters in genesis-core, genesis-co**
+
+### Added
+- Compute heartbeat_m in parser/blueprints.rs from spontaneous_firing_period_ticks using DDS multiplier formula (65536 / period)
+- Extend cu_update_neurons_kernel to integrate DDS phase accumulator using current_tick and heartbeat_m
+- Make neuron spiking logic combine GLIF spikes and heartbeat spikes, resetting membrane only on GLIF spikes
+- Add tick_base parameter to ShardEngine::execute_day_phase and pass through to cu_step_day_phase
+- Add current_tick parameter to cu_step_day_phase and cu_update_neurons_kernel in CUDA bindings
+- Update execute_day_phase in shard_thread.rs to receive and forward tick_base from ComputeCommand::RunBatch
+- Replace _pad1[2] with heartbeat_m: u16 in VariantParameters across CUDA bindings, FFI, and core layouts
+- Add spontaneous_firing_period_ticks field to NeuronType in config/blueprints.rs with serde default
+- Update manifest serialization in genesis-baker/main.rs to include heartbeat_m field
+
+## [0.254.30] - 2026-03-07 16:24:10
+
+**IMPORTANT**
+
+### Added
+- Add spontaneous_firing_period_ticks configuration field for neuron types in docs/specs/02_configuration.md
+- Document DDS Heartbeat compilation from period_ticks to heartbeat_m multiplier in genesis-baker/src/compile_heartbeat.rs
+- Add comprehensive DDS Heartbeat mathematical model and physiological contract in docs/specs/03_neuron_model.md
+- Integrate DDS Phase Accumulator logic into update_neurons_kernel in docs/specs/05_signal_physics.md
+- Extend VariantParameters struct in docs/specs/07_gpu_runtime.md with 16-bit heartbeat_m field and adjust padding
+- Add entries for releases 0.247.30 (Zero-Downtime Recovery Integration), 0.244.29 (Strict Dale's Law), and 0.237.29 (Warp-Aggregated Telemetry) to CHANGELOG.md
+
 ## [0.247.30] - 2026-03-07 15:24:24
 
 **Zero-Downtime Recovery Integration**

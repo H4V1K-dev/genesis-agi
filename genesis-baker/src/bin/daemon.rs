@@ -215,7 +215,9 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
         .map_err(|e| eprintln!("[Daemon] Cannot parse manifest.toml: {}", e)).ok()?;
 
     let padded_n = manifest.memory.padded_n as u32;
-    let total_axons_max = (manifest.memory.padded_n + manifest.memory.virtual_axons + manifest.memory.ghost_capacity) as u32;
+    // [DOD FIX] Вся математика аксонов обязана быть выровнена по варпам (кратно 32)
+    let raw_axons = manifest.memory.padded_n + manifest.memory.virtual_axons + manifest.memory.ghost_capacity;
+    let total_axons_max = ((raw_axons + 31) & !31) as u32;
 
     // [DOD FIX] Zero-Copy Memory Mapping instead of std::fs::read.
     // Guarantees OS page alignment (4096 bytes) -> bytemuck is strictly safe.
@@ -237,8 +239,9 @@ fn build_night_context(baked_dir: &PathBuf, brain_toml: &PathBuf) -> Option<Nigh
     let (axon_heads, soma_to_axon) = {
         // Zero-cost casting without allocations
         let mut axon_heads: Vec<genesis_core::layout::BurstHeads8> = {
-            if axons_mmap.len() > 16 {
-                bytemuck::cast_slice(&axons_mmap[16..]).to_vec()
+            if !axons_mmap.is_empty() {
+                // [DOD FIX] No legacy 16-byte header. Pure raw slice.
+                bytemuck::cast_slice(&axons_mmap[..]).to_vec()
             } else {
                 vec![genesis_core::layout::BurstHeads8::empty(genesis_core::constants::AXON_SENTINEL); total_axons_max as usize]
             }
