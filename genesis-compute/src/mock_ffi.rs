@@ -223,6 +223,7 @@ pub extern "C" fn gpu_reset_telemetry_count(
 #[no_mangle]
 pub extern "C" fn launch_extract_telemetry(
     _vram: VramState,
+    _padded_n: u32,
     _out_ids: *mut u32,
     out_count_pinned: *mut u32,
     _stream: *mut c_void,

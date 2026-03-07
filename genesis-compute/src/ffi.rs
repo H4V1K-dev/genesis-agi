@@ -119,7 +119,7 @@ extern "C" {
         num_outputs: u32,
     ) -> i32;
 
-    /// Заливает таблицу параметров (16 записей) в __constant__ память GPU.
+    /// Глобальная константная память GPU (448 байт).
     pub fn cu_upload_constant_memory(lut: *const VariantParameters) -> i32;
 
     // =====================================================================
@@ -250,6 +250,7 @@ extern "C" {
 
     pub fn launch_extract_telemetry(
         vram: VramState,
+        padded_n: u32,
         out_ids: *mut u32,
         out_count_pinned: *mut u32,
         stream: CudaStream,

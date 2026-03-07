@@ -324,6 +324,45 @@ __global__ void cu_record_readout_kernel(const uint8_t* __restrict__ soma_flags,
   output_history[tid] = is_spiking;
 }
 
+// ============================================================================
+// 7. Warp-Aggregated Telemetry Extraction
+// ============================================================================
+__global__ void extract_telemetry_kernel(
+    const uint8_t* __restrict__ soma_flags,
+    uint32_t* __restrict__ out_ids,
+    uint32_t* __restrict__ out_count,
+    uint32_t padded_n
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t lane = threadIdx.x % 32;
+
+    // 1. Читаем флаг спайка (бит 0)
+    bool is_spiking = false;
+    if (tid < padded_n) {
+        is_spiking = (soma_flags[tid] & 0x01) != 0;
+    }
+
+    // 2. Ballot: каждый поток выставляет свой бит в 32-битную маску варпа
+    uint32_t active_mask = __ballot_sync(0xFFFFFFFF, is_spiking);
+    uint32_t warp_pop = __popc(active_mask);
+
+    // 3. Leader (lane 0) делает единственный atomicAdd в глобальную память
+    uint32_t warp_offset = 0;
+    if (lane == 0 && warp_pop > 0) {
+        warp_offset = atomicAdd(out_count, warp_pop);
+    }
+
+    // 4. Leader раздает полученный offset всем потокам варпа
+    warp_offset = __shfl_sync(0xFFFFFFFF, warp_offset, 0);
+
+    // 5. Запись ID в плоский массив без коллизий
+    if (is_spiking) {
+        // Вычисляем локальный индекс потока среди стреляющих (считаем единицы до текущего бита)
+        uint32_t local_rank = __popc(active_mask & ((1u << lane) - 1));
+        out_ids[warp_offset + local_rank] = tid;
+    }
+}
+
 extern "C" {
 
 // ============================================================================
